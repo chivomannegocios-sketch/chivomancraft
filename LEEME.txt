@@ -1,0 +1,207 @@
+JUEGO VOXEL (prototipo)  -  por CHlVOMAN
+========================================
+
+COMO COMPILAR Y JUGAR (Windows)
+  1. Necesitas Visual Studio 2022 o 2026 (con "Desarrollo para el escritorio con C++") y CMake.
+  2. Haz doble clic en  compilar_y_jugar.bat
+     (la primera vez descarga GLFW, necesita internet).
+  3. Si algo falla, copia el texto que sale en la consola y pasamelo.
+
+CONTROLES
+  W A S D ........ moverte           Espacio ..... saltar (volando: subir)
+  Shift .......... correr            Ctrl ........ (volando: bajar)
+  F .............. volar / caminar (volando atraviesas todo)
+  Clic izquierdo . romper            Clic derecho . poner
+  B .............. pincel: CUBITO pequeno  <->  BLOQUE completo
+  1..7 o rueda ... material (pasto, tierra, piedra, arena, agua, madera, hojas)
+  F5 ............. guardar ahora (tambien se guarda solo cada 30 s y al salir)
+  V .............. activa/quita la sincronizacion vertical (FPS libres)
+  Esc ............ suelta el mouse (clic para volver) | Esc dos veces: salir
+  En el titulo de la ventana ves FPS, chunks, triangulos y tu posicion.
+
+GUARDADO
+  Se guarda en la carpeta  mundos/  (una subcarpeta por mundo, junto al juego). Ver NOVEDADES v9.
+  Solo se guardan los chunks que cambiaste, comprimidos (cada uno pesa unos KB), y tu posicion.
+  Para empezar un mundo nuevo: borra esa carpeta.
+
+LA IDEA: CUBITOS MAS PEQUENOS QUE UN BLOQUE
+  En src/mundo.h cambia  SUB  (1, 2, 4 u 8). Un bloque de Minecraft = SUB x SUB x SUB cubitos.
+    SUB = 1 -> como Minecraft normal
+    SUB = 2 -> 8 cubitos por bloque (recomendado para empezar)
+    SUB = 4 -> 64 cubitos por bloque (muy fino; ya probado, va bien)
+  Tambien puedes cambiar VIEW_BLOCKS (distancia de vision) y WATER_LEVEL.
+
+COMO ESTA OPTIMIZADO
+  - Mallas "greedy": las caras vecinas del mismo material se funden en una sola.
+  - Solo se dibujan las caras que se ven (nada de caras ocultas).
+  - Los chunks de puro aire o pura piedra no guardan datos ni malla.
+  - El terreno y las mallas se crean en hilos aparte: no se congela al explorar.
+  - No se dibuja lo que esta fuera de la camara (frustum culling).
+
+LO QUE FALTA (siguientes pasos): objetos movibles de cubitos, barra de objetos con texto, luz y sombras, cuevas,
+  mobs, y objetos hechos de cubitos (aviones, autos) como piezas movibles.
+
+NOVEDADES v3 - AGUA Y ARENA
+- Rios sinuosos y lagunas, con playas de arena en las orillas.
+- Zonas de desierto (arena, sin arboles).
+- Ajustes en src/mundo.h: LAGO_UMBRAL (mas alto = mas lagos) y RIO_ANCHO (ancho de rios).
+- Si ya tenias un mundo guardado, borra la carpeta mundo_SUB2 para ver el terreno nuevo
+  (los chunks que ya habias editado conservan el terreno viejo).
+
+NOVEDADES v4 - MODO CREATIVO Y MENU DE MATERIALES
+- Volar: tecla F o doble toque de Espacio. Espacio sube, Shift baja, R = turbo.
+- Ctrl: cambia el pincel entre CUBITO (1 cubito) y BLOQUE 2x2 (como un bloque de Minecraft). (B hace lo mismo)
+- Barra de materiales abajo (0 = DESTRUIR, 1-7 materiales). Se elige con teclas 0-7, rueda del raton o X para destruir.
+- Tecla E: menu de materiales (clic para elegir, E o Esc para cerrar).
+- Con DESTRUIR elegido, clic izquierdo o derecho rompen. Con un material: izquierdo rompe, derecho pone.
+- Texto en pantalla: FPS, posicion, pincel y modo (volando/caminando).
+
+NOVEDADES v5 - MINERALES
+- 7 materiales nuevos: CARBON, HIERRO, COBRE, ORO, DIAMANTE, CUARZO (vetas en la roca) y ARCILLA (fondo de rios y lagunas).
+- Las vetas son manchas irregulares bajo tierra; hay que cavar para encontrarlas. Mas profundo = mas raro:
+  carbon y hierro (comunes), cobre, cuarzo, oro (profundo) y diamante (casi en el fondo).
+- Barra de 9 casillas (teclas 1-9 o rueda). En el menu (E) elige un material y se pone en la casilla elegida.
+- Ajustes: tabla de vetas en src/mundo.h (funcion vetaEnCelda: profundidad, probabilidad y tamano de cada mineral).
+- Para ver los minerales en un mundo ya guardado, borra la carpeta mundo_SUB2 (los chunks editados conservan lo viejo).
+
+NOVEDADES v6 - TODOS LOS MINERALES Y CUEVAS
+- 6 minerales mas: ESTANO, ALUMINIO (bauxita), PLATA, TITANIO, LITIO y URANIO. Ya estan los 13 materiales de roca/mineral + arcilla.
+  Mas profundo = mas raro: titanio y uranio solo muy abajo, plata y litio abajo/medio, aluminio y estano medios.
+- Cuevas: tuneles que serpentean y salas grandes bajo tierra, con minerales a la vista en las paredes.
+  Algunas cuevas tienen entradas a la superficie (en zonas sobre el nivel del agua).
+- El menu (E) ahora tiene 21 casillas (7 por fila).
+- Ajustes: tabla de vetas en vetaEnCelda y parametros de cuevas en generarChunk (src/mundo.h).
+  Cuevas mas anchas: sube 0.0070 (tuneles) o baja 1.02 (salas). Aun no hay luz: las cuevas se ven con la luz del dia.
+- Borra la carpeta mundo_SUB2 para generar un mundo nuevo con cuevas y todos los minerales.
+
+NOVEDADES v7 - ILUMINACION, DIA/NOCHE Y ANTORCHA
+- Luz como en Minecraft: luz del cielo (baja recta y se reparte por los lados) y luz de bloque (antorchas).
+  15 niveles por bloque; las hojas y el agua dejan pasar la luz pero la apagan un poco. Las cuevas quedan oscuras.
+- Sombras como las de Minecraft: sin sombras proyectadas; lo que se oscurece es lo que no recibe luz (bajo techos,
+  arboles, cuevas) y cada cara tiene su brillo (arriba mas clara, abajo mas oscura).
+- Ciclo de dia y noche (10 minutos). Tecla T: salta a la siguiente fase (mediodia, atardecer, medianoche, amanecer).
+  La hora aparece en pantalla.
+- ANTORCHA: ultima casilla del menu (E); por defecto en la casilla 9. Siempre se pone de 1 cubito, brilla sola y ilumina
+  unos 14 bloques. Se rompe con clic izquierdo y no estorba al caminar.
+- Como esta hecho (optimizado): la luz se calcula por chunk en los hilos de trabajo y llega a la tarjeta grafica como una
+  textura 3D pequena (2 bytes por celda); el shader la lee con filtrado, asi la luz sale suave sin tocar la malla y se
+  mantiene el fusionado de caras. Al editar, solo se recalcula la luz de los chunks cercanos.
+- Ajustes: src/luz.h (LMAX, LTORCH, que bloques dejan pasar la luz) y el brillo minimo/curva en el shader (main.cpp).
+- Borra mundo_SUB2 si quieres un mundo nuevo (los bloques ya guardados no cambian; la luz siempre se recalcula).
+
+NOVEDADES v8 - CIELO, SOL, LUNA, NUBES Y ARREGLOS
+- Cielo con degradado, SOL y LUNA cuadrados (con crateres), estrellas de noche y atardeceres anaranjados.
+  Siguen la hora del dia (tecla T salta de fase).
+- Nubes de cajas que se desplazan con el viento (a ~110 bloques de altura); de noche se ven oscuras.
+- ARREGLO: puntitos celestes en las cuevas. Eran rendijas entre caras vecinas de la malla; ahora las caras se
+  solapan un poco (0.004 de cubito) y ya no se ve el cielo a traves.
+- ARREGLO: parpadeo al romper o poner (se veia todo un instante). Los chunks cercanos desaparecian mientras
+  se recalculaba su luz; ahora se sigue dibujando la malla anterior hasta que llega la nueva.
+
+NOVEDADES v9 - MENU DE MUNDOS Y AGUA QUE FLUYE
+- Al abrir el juego sale el MENU DE MUNDOS: arriba "+ NUEVO MUNDO", debajo tus mundos guardados (el ultimo jugado
+  primero). Clic en un mundo = jugar. "BORRAR" pide confirmacion (SI / NO) y elimina la carpeta del mundo.
+  Teclas: N = mundo nuevo, ENTER = ultimo mundo jugado, ESC = salir, rueda = ver mas mundos.
+- Cada mundo nuevo tiene su propia SEMILLA (terreno distinto) y su carpeta  mundos/mundo_N .
+  Tu mundo anterior (carpeta mundo_SUB2) se mueve solo a  mundos/mundo_1  ("MUNDO 1") la primera vez.
+- Para cambiar de mundo hay que cerrar el juego y abrirlo otra vez (sale el menu).
+- AGUA QUE FLUYE como en Minecraft: el agua cae al romper el suelo, se reparte de lado (hasta 8 cubitos) y se seca si
+  le quitas la fuente. Los lagos y rios son fuentes: no se vacian, pero si cavas junto a un lago el agua entra y cae.
+  El agua de la barra/menu (AGUA) es una fuente. Se actualiza 10 veces por segundo, cerca de lo que editas.
+- Limite conocido: si cierras el juego con agua a medio fluir, queda congelada a medias hasta que edites cerca.
+
+NOVEDADES v10 - MUNDO LEJANO Y MENU DE PAUSA
+- ESC ahora abre el menu de PAUSA: CONTINUAR / MUNDO LEJANO: ON-OFF / GUARDAR Y SALIR (ESC otra vez continua).
+  La opcion se guarda en opciones.txt (junto al juego). Viene en ON.
+- MUNDO LEJANO: terreno y agua en baja resolucion hasta ~1300 bloques (antes 128). Se calcula directo del generador
+  del terreno, sin chunks 3D: tres anillos de baldosas con celdas de 2, 4 y 8 bloques, en los hilos de trabajo.
+  Se dibuja antes que el mundo real con su propia camara (sin parpadeos) y el mundo real siempre queda encima.
+- Limites: lo lejano no muestra arboles, cuevas ni lo que construyas/caves (al acercarte aparece el mundo real).
+- Ajustes en src/main.cpp: LOD_CELDA, LOD_ROUT (radios) y LOD_FOG_MAX (niebla).
+- Para ver cuantas baldosas hay: titulo de la ventana "lejano ON <n>".
+
+NOVEDADES v11 - ARBOLES, SOMBRAS Y CONSTRUCCIONES EN EL MUNDO LEJANO
+- ARBOLES LEJANOS: en los dos anillos cercanos (hasta ~640 bloques) se dibujan los arboles (copa y tronco en cajas,
+  con el mismo sombreado de caras que el mundo real). En el anillo mas lejano no hay arboles (serian menos de un pixel).
+- SOMBRAS (baratas, calculadas una sola vez al crear cada baldosa): oscurecen valles y zonas tapadas por lomas
+  (oclusion ambiental por horizonte), la tierra se ve en las laderas empinadas y hay sombra bajo las copas.
+  Todo sigue la hora del dia igual que el mundo real. No hay sombras proyectadas en tiempo real (costarian mucho).
+- TUS CAMBIOS SE VEN A LO LEJOS: las columnas de chunks que editaste (hasta 700 bloques, las 100 mas cercanas) se
+  mantienen cargadas y dibujadas con su malla real aunque te alejes; el terreno lejano se recorta en esa zona para
+  no taparla. Al abrir un mundo se detectan solas leyendo las carpetas guardadas.
+- La camara del mundo real ahora llega a 1500 bloques cuando MUNDO LEJANO esta en ON.
+- Ajustes: ANCLA_DIST y ANCLA_MAX (cuantas columnas editadas se mantienen), en src/main.cpp.
+
+NOVEDADES v12 - ARREGLO DE CUEVAS LEJANAS
+- ARREGLO: partes de cuevas/subsuelo se veian "transparentes" o como manchas negras flotando a lo lejos. Ahora, en el borde
+  del mundo real y en las columnas editadas lejanas, solo se dibuja una columna cuando ya esta COMPLETA (todos sus
+  chunks listos); antes se veian primero los chunks de abajo sobre el terreno lejano.
+- Pausa (ESC): nuevo boton CAMBIOS LEJANOS: ON/OFF para apagar solo lo de las zonas editadas lejanas (util para
+  probar si algo raro viene de ahi). Se guarda en opciones.txt.
+
+NOVEDADES v13
+- Mundo lejano: las cuevas y partes subterraneas de zonas lejanas ya no se dibujan (el terreno lejano las tapa), asi no salen manchas negras. Tus construcciones sobre la superficie se siguen viendo.
+
+NOVEDADES v14
+- Dos minerales nuevos: AZUFRE (amarillo verdoso, hasta ~40 bloques de profundidad) y SALITRE (blanco rosado, hasta ~55). Salen en el menu de materiales (E) y aparecen en vetas bajo tierra en zonas nuevas. Los mundos viejos siguen igual.
+- Con carbon + salitre + azufre se hara la polvora cuando pongamos el horno.
+
+NOVEDADES v15 - GRAFICOS MEJORADOS (estilo shader pack, propios del motor)
+- Sombras de sol suaves (mapa de sombras de 2048, ~100 bloques alrededor), con sombra azulada y sol calido.
+- Oclusion ambiental (AO), bloom, antialiasing FXAA, tonemapping y colores mas vivos.
+- Se activan/desactivan en ESC -> GRAFICOS: ON/OFF (se guarda en opciones.txt). Si te bajan los FPS, apagalo.
+- Pendiente (no incluido): nubes volumetricas, agua con reflejos, rayos de luz, luz de color.
+
+NOVEDADES v16
+- Arreglo: la oclusion ambiental ya no oscurece el suelo/agua al mirar al horizonte (superficies rasantes). Vineta mas suave.
+- Optimizacion: el mapa de sombras solo se rehace cuando cambia la celda del jugador, se mueve el sol o pasan 4 cuadros (antes cada cuadro).
+
+NOVEDADES v17 - LUCES LED DE COLORES
+- 12 bloques LED en el menu de materiales (E): rojo, naranja, amarillo, lima, verde, turquesa, celeste, azul, violeta, magenta, rosa y blanco.
+- Cada LED ilumina unos 15 bloques con SU color; si se juntan luces de colores distintos, los colores se suman (rojo + azul = magenta). La antorcha sigue dando luz calida.
+- La luz de bloque ahora se guarda en rojo/verde/azul (la textura de luz paso de 2 a 4 bytes por celda). Los mundos viejos funcionan igual; las luces se recalculan solas.
+- Menu de materiales reorganizado en 9 columnas para que entren todos.
+
+NOVEDADES v18 - VIDRIO, VEHICULOS Y AVIONETA
+  Bloques nuevos (menu E, abajo del todo): VIDRIO (transparente, deja pasar la luz), CARROCERIA, ASIENTO, TIMON, ALA, RUEDA,
+  HELICE, CONTROL, y la herramienta SPRAY.
+  - SPRAY: clic derecho sobre la CARROCERIA la pinta. Z / C cambian el color (12 colores). Respeta el pincel (CTRL: cubito/bloque).
+  - RUEDA: se pone como un disco (2 cubitos de ancho) con el eje hacia donde miras. Z / C la agrandan o achican (diametro 2..24).
+  - Construye la avioneta con esos bloques (usa el modo CUBITO para piezas finas como las alas):
+      * un bloque CONTROL, al menos un ASIENTO y un TIMON,
+      * ALAS: la envergadura (de punta a punta) debe ser al menos la MITAD del largo del avion, si no, no vuela,
+      * una o mas HELICES en la nariz (el avion apunta hacia donde esta la helice),
+      * ruedas (RUEDA) unidas al cuerpo, carroceria y vidrio como quieras. Todas las piezas deben estar pegadas entre si.
+  - G mirando una pieza: ENSAMBLA (las piezas conectadas pasan a ser un vehiculo; las helices giran).
+    G cerca de la avioneta: subir. G dentro: bajar (ver v19).  H: DESARMAR (vuelve a ser bloques).
+  - Vuelo:  Shift / Ctrl = mas / menos gas (X = gas 0)   W / S = bajar / subir la nariz   A / D = inclinar (gira)
+            Q / E = timon   Espacio = freno   TAB = camara de cabina / externa (el raton mira alrededor)
+    Despegue: acelera con Shift y tira de S a unos 60-70 km/h. Los choques fuertes frenan la avioneta (no se rompe).
+  - La avioneta se guarda con el mundo (archivo vehiculo.txt). Por ahora solo una avioneta por mundo.
+
+NOVEDADES v19 - LED EN VEHICULOS Y CAMINAR SOBRE LA AVIONETA
+  - Los bloques LED pegados a un vehiculo se ensamblan con el y brillan con su color (de noche se ven con resplandor).
+    No iluminan el terreno (solo brillo propio).
+  - G en pleno vuelo: bajas del asiento y quedas PARADO ENCIMA del asiento. La avioneta sigue sola con el rumbo y el gas que llevaba
+    (el gas baja poco a poco y al final empieza a caer).
+  - Puedes caminar por dentro y por encima de la avioneta (techo, alas); viajas con ella. Si caminas hasta donde no hay piezas o saltas, caes
+    conservando la velocidad de la avioneta un rato. Si la avioneta se inclina demasiado, dejas de ir pegado.
+  - G cerca de la avioneta (aunque este volando) te sube de nuevo al asiento. H la desarma cuando esta quieta y no vas pilotando.
+
+NOVEDADES v20 - CAMINAR SOBRE LA AVIONETA INCLINADA
+  - Caminas en el sistema de referencia de la avioneta: aunque este inclinada o cabeceando, el piso no te empuja ni te bloquea.
+  - Solo si se inclina mas de 50 grados dejas de ir pegado y caes (la colision normal vuelve a actuar).
+
+NOVEDADES v21 - VERSION ANDROID (APK) - SIN PROBAR EN UN CELULAR REAL
+  Como sacar el APK:
+   1) Crea un repositorio en GitHub y sube TODO el contenido de esta carpeta (incluida .github y android).
+   2) Entra en la pestana "Actions" del repositorio: "Android APK" se ejecuta solo (o con "Run workflow").
+   3) Cuando termine (unos 5-10 min), abre la ejecucion y baja "JuegoVoxel-apk" (Artifacts). Descomprime e instala el .apk en el celular (permitir origenes desconocidos).
+   Si falla, copia el log del paso que fallo y pasamelo.
+  Controles tactiles:
+   - Mitad izquierda: joystick flotante (caminar). Mitad derecha: arrastrar para mirar.
+   - Botones: SALTO, ROMPER y PONER (mantener), VOLAR, BAJAR (volando), MENU (materiales), PINCEL, G, H, PAUSA.
+   - Tocar la barra inferior elige el material. En menus: tocar = clic, arrastrar = desplazar.
+   - Pilotando: joystick = palanca (arriba/abajo nariz, izq/der inclinar), GAS+, GAS-, FRENO, Q, E, CAMARA, BAJAR.
+  Optimizaciones en celular: distancia 64 bloques, sin LOD ni efectos (sombras/SSAO/bloom), render a ~720p, dibujo de cerca a lejos,
+   menos hilos, subida de mallas limitada por cuadro, sin dibujar lo subterraneo.
