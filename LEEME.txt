@@ -205,3 +205,78 @@ NOVEDADES v21 - VERSION ANDROID (APK) - SIN PROBAR EN UN CELULAR REAL
    - Pilotando: joystick = palanca (arriba/abajo nariz, izq/der inclinar), GAS+, GAS-, FRENO, Q, E, CAMARA, BAJAR.
   Optimizaciones en celular: distancia 64 bloques, sin LOD ni efectos (sombras/SSAO/bloom), render a ~720p, dibujo de cerca a lejos,
    menos hilos, subida de mallas limitada por cuadro, sin dibujar lo subterraneo.
+
+NOVEDADES v22 - MULTIJUGADOR POR RED (LAN / IP / Tailscale)
+  - hospedar.bat: abre tu mundo para otros. Elige el mundo en el menu; arriba a la izquierda sale tu IP y el puerto (25565).
+  - unirse.bat: pide la IP del anfitrion y se une (baja su mundo y aparece junto a el). En la misma PC: 127.0.0.1.
+  - Ves a los demas con la skin por defecto (la tuya), con su nombre encima y animacion al caminar.
+  - Lo que construyes o rompes lo ven todos. La hora del dia la manda el anfitrion.
+  - Por internet: usa Tailscale (la IP 100.x del anfitrion) o abre el puerto 25565 TCP en el router.
+  - Todavia NO se comparte la avioneta (el otro ve los bloques desaparecer al armarla) ni hay chat.
+
+NOVEDADES v23 - AVIONETA COMPARTIDA Y CHAT
+  - Si alguien ensambla la avioneta (G), todos la ven; si la desarma (H), desaparece para todos.
+  - La simula quien la pilota (ve su vuelo suave); si nadie la pilota, la simula el anfitrion. Los demas pueden pararse encima y viajan con ella.
+  - Solo uno pilota a la vez ("OTRO JUGADOR LA ESTA PILOTANDO"). Si bajas en vuelo, sigue sola como antes.
+  - CHAT: Enter abre, escribes, Enter envia, Esc cancela. Los mensajes salen abajo a la izquierda y se van tras 12 s.
+
+NOVEDADES v24 - BARRA PERSONALIZABLE Y MODO SURVIVAL
+  - E abre el menu de objetos con la barra abajo: arrastra objetos a las 9 casillas (o clic en objeto y clic en casilla). Clic derecho o X vacia una casilla (mano vacia: solo rompe). Se guarda por mundo.
+  - Pausa (ESC) -> boton MODO: CREATIVO / SURVIVAL (por mundo).
+  - SURVIVAL: 10 corazones, se regenera sola (sin hambre), dano por caida (>3 bloques), no se puede volar, al morir reapareces en tu punto (conservas todo).
+    Picas cubitos y los ganas (1 cubito = 1 unidad; un bloque 2x2x2 = 8). Poner un cubito gasta 1. Inventario = los objetos que tienes (E).
+    Piedra y carbon necesitan pico; hierro, cobre, aluminio, plata, cuarzo, azufre y salitre piden pico de piedra; oro, diamante, titanio, litio y uranio piden pico de hierro. Sin la herramienta correcta se rompe pero no suelta nada.
+    Pico, hacha y pala (madera/piedra/hierro/diamante) pican mas rapido su tipo de material (pala: tierra, pasto, arena, arcilla; hacha: madera, hojas; pico: lo demas). No se gastan.
+    Pestana RECETAS (Tab o clic): fabricar pico/hacha/pala, antorcha, vidrio, carroceria, asiento, timon, ala, rueda, helice, control y spray. Sin mesa de crafteo.
+  - Creativo: el menu trae ademas las 12 herramientas.
+
+NOVEDADES v25 - OBJETO EN LA MANO
+  - En primera persona ves tu brazo (con tu skin) abajo a la derecha con lo que tienes elegido en la barra: herramientas (pico, hacha, pala), bloques, spray... Con la casilla vacia solo ves la mano.
+  - Al picar o poner la mano hace la animacion de golpe.
+  - Los demas jugadores te ven con el objeto en la mano y la animacion de golpe (viaja por la red). Tambien se corrigio la cabeza de los jugadores (miraba al reves).
+
+NOVEDADES v26 - BIOMAS
+  El terreno ahora tiene biomas (temperatura x humedad, con bordes mezclados):
+  pradera, bosque, bosque denso, desierto (arena), meseta/mesa (arcilla en
+  escalones con vetas), pantano (plano, cerca del agua) y montanas de roca.
+  Usa un MUNDO NUEVO (o otra SEMILLA): los mundos viejos muestran cortes en
+  chunks ya guardados. El pasto es del mismo tono en pradera/bosque/denso.
+  El mundo lejano usa los mismos colores por bioma.
+
+NOVEDADES v27 - BIOMAS NUEVOS Y ARBOLES DE COLORES
+  Bloques nuevos (en el menu E, al final): NIEVE, HIELO, CACTUS, HOJAS ROJAS, HOJAS NARANJA,
+  HOJAS AMARILLAS, HOJAS ROSAS, PINO, PASTO SECO.
+  Biomas nuevos: TUNDRA (nieve, pinos, lagos helados, cumbres nevadas), SABANA (pasto seco y
+  acacias de copa plana), BOSQUE DE OTONO (arboles rojos, naranjas, amarillos y cerezos rosas).
+  El desierto ahora tiene cactus; en pradera y bosque salen algunos arboles de otono y cerezos.
+  Los biomas se repartieron distinto: usa un MUNDO NUEVO para verlos.
+
+NOVEDADES v28 - MAS PROFUNDIDAD
+  El mundo ahora tiene 160 bloques de alto (antes 96): el relieve se subio 64 bloques, asi que
+  puedes cavar unos 85-130 bloques bajo la superficie (antes unos 20-40). Diamante, titanio, oro
+  y uranio tambien aparecen en las capas nuevas. Las nubes subieron a la nueva altura.
+  IMPORTANTE: los mundos guardados antes de esta version NO sirven (el terreno quedo mas arriba):
+  crea un mundo nuevo.
+
+NOVEDADES v29 - PROFUNDIDAD COMO MINECRAFT
+  El mundo ahora tiene 201 bloques de alto: el agua esta en y=127 y el piso en y=0, o sea 127
+  bloques de profundidad bajo el nivel del agua (igual que Minecraft, 63 a -64). Mundo nuevo obligatorio.
+
+NOVEDADES v30 - OCLUSION (no dibujar lo tapado)
+  Cuando estas sobre el suelo, ya no se dibujan los chunks tapados por el relieve (detras de una
+  montana) ni los enterrados muy hondo. En el titulo de la ventana sale "tapados N". Bajo tierra
+  (en cuevas) no se oculta nada. Las columnas que editaste tampoco se ocultan.
+
+NOVEDADES v31 - MENOS TIRONES AL CARGAR CHUNKS
+  Los hilos que generan y mallan chunks ahora trabajan con prioridad baja, para que el hilo que
+  dibuja no se quede sin CPU cuando cargas terreno nuevo.
+
+NOVEDADES v32 - ROMPER BLOQUES MAS FLUIDO Y MENU DE RENDIMIENTO
+  - Romper/poner bloques: ya no se rehacen decenas de chunks por cada bloque (solo los que de verdad
+    cambian de luz) y el calculo de luz es mas corto (mismo resultado). Antes, con el mundo de 201
+    bloques de alto, cada rotura recalculaba toda la columna de chunks hacia abajo.
+  - Menu de pausa, nuevos botones:
+      RENDIMIENTO: NORMAL / ALTO / MAXIMO  -> mas hilos de carga, cola mas larga y mas mallas por cuadro
+         (usa mas CPU y mas RAM para cargar terreno mas rapido; se guarda en opciones.txt)
+      CONSERVAR CHUNKS: SI / NO  -> los chunks ya cargados se quedan en RAM al alejarte (hasta ~8000 con datos,
+         unos 250 MB; despues se descartan los mas lejanos) y no hay que volver a calcularlos.

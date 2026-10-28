@@ -21,8 +21,11 @@ FetchContent_MakeAvailable(glfw)
 
 find_package(Threads REQUIRED)
 
-add_executable(juego src/main.cpp src/mundo.h src/luz.h src/gl_loader.h)
+add_executable(juego src/main.cpp src/red_sock.cpp src/mundo.h src/luz.h src/gl_loader.h src/red.h src/jugadores.h src/skin.h)
 target_link_libraries(juego PRIVATE glfw Threads::Threads)
+if(WIN32)
+  target_link_libraries(juego PRIVATE ws2_32)
+endif()
 
 # prueba del mundo sin ventana (opcional)
 add_executable(prueba_mundo src/prueba_mundo.cpp src/mundo.h)

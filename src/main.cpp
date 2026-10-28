@@ -17,6 +17,17 @@
 #include "mundo.h"
 #include "luz.h"
 #include "tactil.h"
+#include "red.h"
+#include <cctype>
+#include <deque>
+#include <string>
+#include <vector>
+static bool g_chat = false;      // escribiendo en el chat: el teclado no mueve al jugador
+static inline int teclaReal_(GLFWwindow* w, int k) { return g_chat ? 0 : glfwGetKey(w, k); }
+#define glfwGetKey(w, k) teclaReal_(w, k)
+struct ChatMsg { std::string txt; double t; };
+static std::deque<ChatMsg> g_chatLog;
+static std::string g_chatBuf;
 
 #include <unordered_map>
 #include <unordered_set>
@@ -141,20 +152,36 @@ static ChunkP buscar(int cx, int cy, int cz) {
 }
 
 // ---------------------------------------------------------------- hilos de trabajo
+// los hilos que generan y mallan chunks trabajan con prioridad baja, para que el hilo que dibuja no se quede sin CPU al cargar terreno nuevo
+#ifdef _WIN32
+extern "C" __declspec(dllimport) void* __stdcall GetCurrentThread(void);
+extern "C" __declspec(dllimport) int __stdcall SetThreadPriority(void*, int);
+static void bajarPrioridadHilo() { SetThreadPriority(GetCurrentThread(), -1); }      // THREAD_PRIORITY_BELOW_NORMAL
+#elif defined(__linux__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+static void bajarPrioridadHilo() { setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 5); }
+#else
+static void bajarPrioridadHilo() {}
+#endif
 struct Pool {
     std::vector<std::thread> hilos;
     std::mutex m;
     std::condition_variable cv;
     std::deque<std::function<void()>> cola;
     bool parar = false;
+    std::atomic<int> activos{1000};                       // cuantos hilos pueden trabajar (los demas esperan): cambia con el perfil de rendimiento
+    void fijarActivos(int n) { activos.store(n); cv.notify_all(); }
     void iniciar(int n) {
         for (int i = 0; i < n; i++)
-            hilos.emplace_back([this] {
+            hilos.emplace_back([this, i] {
+                bajarPrioridadHilo();
                 for (;;) {
                     std::function<void()> f;
                     {
                         std::unique_lock<std::mutex> lk(m);
-                        cv.wait(lk, [this] { return parar || !cola.empty(); });
+                        cv.wait(lk, [this, i] { return parar || (!cola.empty() && i < activos.load()); });
                         if (parar && cola.empty()) return;
                         f = std::move(cola.front());
                         cola.pop_front();
@@ -355,7 +382,9 @@ static void remallarYa(const ChunkP& c) {
     DatosChunk s[7];
     juntar(*c, s);
     DatosMalla op, ag;
+    auto t0 = std::chrono::steady_clock::now();
     construirMalla(s, op, ag);
+    auto t1 = std::chrono::steady_clock::now();
     std::vector<uint8_t> luz;
     if (!op.i.empty() || !ag.i.empty()) {
         auto sn = std::make_unique<SnapColumnas>();
@@ -363,6 +392,8 @@ static void remallarYa(const ChunkP& c) {
         luz.resize((size_t)LN * LN * LN * 4);
         calcularLuz(*sn, c->cy, luz.data());
     }
+    auto t2 = std::chrono::steady_clock::now();
+    if (std::getenv("DBGROMPER")) std::printf("  remallarYa: malla %.2f ms, luz %.2f ms\n", std::chrono::duration<double, std::milli>(t1 - t0).count(), std::chrono::duration<double, std::milli>(t2 - t1).count());
     c->version++;
     std::lock_guard<std::mutex> lk(c->mtx);
     c->gOp.subir(op);
@@ -373,18 +404,33 @@ static void remallarYa(const ChunkP& c) {
 
 // Tras editar, la luz de los chunks cercanos puede cambiar (hasta LMAX cubitos a los lados y toda la columna hacia abajo).
 // Se marcan para rehacerse en los hilos de trabajo; mientras tanto se sigue viendo la malla anterior.
+static uint8_t leerCubito(int vx, int vy, int vz, bool* conocido);
+static int g_marcadosN = 0;
 static void marcarLuzSucia(int xmin, int xmax, int ymin, int ymax, int zmin, int zmax, const std::vector<ChunkP>& excluir) {
-    (void)ymin;
     int cx0 = divPiso(xmin - LMAX, CS), cx1 = divPiso(xmax + LMAX, CS);
     int cz0 = divPiso(zmin - LMAX, CS), cz1 = divPiso(zmax + LMAX, CS);
     int cy1 = std::min(HYC - 1, divPiso(ymax + LMAX, CS));
-    for (int cz = cz0; cz <= cz1; cz++) for (int cx = cx0; cx <= cx1; cx++) for (int cy = 0; cy <= cy1; cy++) {
+    // la luz del cielo baja por la columna editada hasta el primer bloque opaco; mas abajo (y mas lejos que LMAX) nada cambia
+    int yPiso = ymin;
+    for (int k = 0; k < 4; k++) {
+        int ex = (k & 1) ? xmax : xmin, ez = (k & 2) ? zmax : zmin, y = ymin;
+        while (y > 0) {
+            bool conocido = true;
+            uint8_t t = leerCubito(ex, y, ez, &conocido);
+            if (!conocido || luzCoste(t) == 255) break;
+            y--;
+        }
+        yPiso = std::min(yPiso, y);
+    }
+    int cy0 = std::max(0, divPiso(yPiso - LMAX - 1, CS));
+    for (int cz = cz0; cz <= cz1; cz++) for (int cx = cx0; cx <= cx1; cx++) for (int cy = cy0; cy <= cy1; cy++) {
         ChunkP c = buscar(cx, cy, cz);
         if (!c || c->state.load() != ST_MESHED) continue;
         if (!c->gOp.n && !c->gAg.n) continue;
         if (std::find(excluir.begin(), excluir.end(), c) != excluir.end()) continue;
         c->version++;
         c->state.store(ST_READY);
+        g_marcadosN++;
     }
 }
 
@@ -407,7 +453,26 @@ static uint8_t leerCubito(int vx, int vy, int vz, bool* conocido = nullptr) {
 static inline int64_t colKey(int cx, int cz) { return ((int64_t)(cx + 1048576) << 21) | (int64_t)(cz + 1048576); }
 static inline void colDec(int64_t k, int& cx, int& cz) { cx = (int)(k >> 21) - 1048576; cz = (int)(k & 0x1FFFFF) - 1048576; }
 static std::unordered_set<int64_t> g_editCols;
+static int g_ocluidosN = 0;           // chunks no dibujados por oclusion (para el titulo)
 static int g_hilos = 4;
+static int g_hilosMax = 4;           // hilos creados; g_hilos = los que estan activos segun el perfil
+static int g_perf = 0;               // perfil de rendimiento: 0 normal, 1 alto, 2 maximo
+static bool g_conservar = false;     // conservar en RAM los chunks ya cargados (no se descartan al alejarte)
+static int g_hilosBase = 4;
+static void aplicarPerf() {      // perfil de rendimiento -> cuantos hilos de carga trabajan
+    int n = g_perf == 0 ? g_hilosBase : g_perf == 1 ? std::min(g_hilosMax, g_hilosBase * 3 / 2 + 1) : g_hilosMax;
+    g_hilos = n; g_pool.fijarActivos(n);
+}
+static inline int genMax() { static const int M[3] = {1, 2, 4}; return g_hilos * 6 * M[g_perf]; }
+static inline int mallaMax() { static const int M[3] = {1, 2, 4}; return g_hilos * 4 * M[g_perf]; }
+static inline int subidasMax() {
+#ifdef MOVIL
+    static const int M[3] = {4, 8, 12};
+#else
+    static const int M[3] = {12, 24, 48};
+#endif
+    return M[g_perf];
+}
 
 // ---------------------------------------------------------------- agua que fluye
 // Cola de celdas "despiertas": cada cambio despierta a la celda y a sus 6 vecinas; cada tick (0.1 s) se revisan en tandas.
@@ -424,6 +489,7 @@ static void aguaDespertar(int x, int y, int z) {
 }
 
 // escribe un cubito y anota los chunks que hay que remallar
+static bool g_redEnviar = false;     // true mientras se aplican acciones del jugador local: esas ediciones se mandan por la red
 static void escribirCubito(int vx, int vy, int vz, uint8_t t, std::vector<ChunkP>& sucios) {
     int cy = divPiso(vy, CS);
     if (cy < 0 || cy >= HYC) return;
@@ -435,6 +501,7 @@ static void escribirCubito(int vx, int vy, int vz, uint8_t t, std::vector<ChunkP
         if (c->dat.uni == t) return;
         c->dat.d = std::make_shared<std::vector<uint8_t>>((size_t)CS * CS * CS, c->dat.uni);
     }
+    if (g_redEnviar && (*c->dat.d)[IDX(lx, ly, lz)] != t) g_red.sal.push_back({vx, vy, vz, t});
     (*c->dat.d)[IDX(lx, ly, lz)] = t;
     c->sucioDisco = true;
     g_editCols.insert(colKey(cx, cz));
@@ -541,17 +608,17 @@ static void lodGenerar(LodTile& t, MascaraP mask) {
     auto enMascara = [&](double bx, double bz) { return !mask->empty() && mask->count(colKey((int)std::floor(bx / 16.0), (int)std::floor(bz / 16.0))) > 0; };
 
     // arboles (solo en los dos anillos cercanos): copa de 5 bloques y tronco, como los reales
-    struct Arbol { double x, z, base; };
+    struct Arbol { double x, z, base; int k; };
     std::vector<Arbol> arboles;
     if (t.niv <= 1) {
         const int ext = N * cel;
         for (int tz = bz0; tz < bz0 + ext; tz++)
             for (int tx = bx0; tx < bx0 + ext; tx++) {
-                if (hash2(tx, tz, 77) % 70 != 0) continue;
-                double ha;
-                if (!hayArbol(tx, tz, &ha)) continue;
+                if (hash2(tx, tz, 77) % 18 != 0) continue;
+                double ha; int kv = 0;
+                if (!vegetacion(tx, tz, &ha, &kv)) continue;
                 if (enMascara(tx + 0.5, tz + 0.5)) continue;
-                arboles.push_back({tx + 0.5, tz + 0.5, (std::floor(ha * SUB) + 1 - 2) / SUB});
+                arboles.push_back({tx + 0.5, tz + 0.5, (std::floor(ha * SUB) + 1 - 2) / SUB, kv});
             }
     }
 
@@ -581,12 +648,17 @@ static void lodGenerar(LodTile& t, MascaraP mask) {
                 double ddx = a.x - bx, ddz = a.z - bz;
                 if (ddx * ddx + ddz * ddz < 7.5) { sh *= 0.80f; break; }
             }
-            bool arenoso = y < WATER_LEVEL + 2.4f || desierto(bx, bz) > 0.5;
+            const int dom = biomaDominante(bx, bz);
+            const bool arcL = y < WATER_LEVEL - 0.6f && vnoise((float)(bx * 0.07), (float)(bz * 0.07), 53u) > 0.52f;
+            const uint8_t sup = tipoSuperficie(dom, y, bx, bz, arcL);
             float cr, cg, cb;
-            if (arenoso) {
-                cr = 0.86f; cg = 0.80f; cb = 0.55f;
-                if (y < WATER_LEVEL - 0.6f && vnoise((float)(bx * 0.07), (float)(bz * 0.07), 53u) > 0.52f) { cr = 0.62f; cg = 0.64f; cb = 0.72f; }
-            } else {
+            if (sup == PIEDRA) { cr = 0.50f; cg = 0.50f; cb = 0.52f; }
+            else if (sup == TIERRA) { cr = 0.45f; cg = 0.32f; cb = 0.20f; }
+            else if (sup == ARCILLA) { cr = 0.62f; cg = 0.64f; cb = 0.72f; }
+            else if (sup == ARENA) { cr = 0.86f; cg = 0.80f; cb = 0.55f; }
+            else if (sup == NIEVE) { cr = 0.93f; cg = 0.95f; cb = 0.99f; }
+            else if (sup == PASTO_SECO) { cr = 0.66f; cg = 0.60f; cb = 0.30f; }
+            else {
                 cr = 0.34f; cg = 0.64f; cb = 0.21f;
                 float m = std::min(0.6f, std::max(0.0f, (1.0f - ny) * 1.4f));       // laderas empinadas: se ve la tierra de los escalones
                 cr += (0.45f - cr) * m; cg += (0.32f - cg) * m; cb += (0.20f - cb) * m;
@@ -640,8 +712,14 @@ static void lodGenerar(LodTile& t, MascaraP mask) {
         }
     };
     for (const Arbol& a : arboles) {
-        if (t.niv == 0) caja(a.x - 0.5, a.base, a.z - 0.5, a.x + 0.5, a.base + 4.0, a.z + 0.5, 0.40f, 0.28f, 0.15f);
-        caja(a.x - 2.5, a.base + 2.9, a.z - 2.5, a.x + 2.5, a.base + 7.1, a.z + 2.5, 0.20f, 0.52f, 0.16f);
+        static const float LC[8][3] = {{0.20f, 0.52f, 0.16f}, {0.78f, 0.13f, 0.10f}, {0.93f, 0.47f, 0.08f}, {0.94f, 0.80f, 0.13f},
+                                       {0.98f, 0.64f, 0.78f}, {0.09f, 0.33f, 0.19f}, {0.20f, 0.52f, 0.16f}, {0.25f, 0.55f, 0.25f}};
+        const float* lc = LC[a.k];
+        if (a.k == 7) { caja(a.x - 0.5, a.base, a.z - 0.5, a.x + 0.5, a.base + 3.5, a.z + 0.5, lc[0], lc[1], lc[2]); continue; }
+        if (t.niv == 0) caja(a.x - 0.5, a.base, a.z - 0.5, a.x + 0.5, a.base + (a.k == 5 ? 6.0 : 4.0), a.z + 0.5, 0.40f, 0.28f, 0.15f);
+        if (a.k == 5) caja(a.x - 1.6, a.base + 2.0, a.z - 1.6, a.x + 1.6, a.base + 9.0, a.z + 1.6, lc[0], lc[1], lc[2]);
+        else if (a.k == 6) caja(a.x - 2.6, a.base + 4.4, a.z - 2.6, a.x + 2.6, a.base + 6.2, a.z + 2.6, lc[0], lc[1], lc[2]);
+        else caja(a.x - 2.5, a.base + 2.9, a.z - 2.5, a.x + 2.5, a.base + 7.1, a.z + 2.5, lc[0], lc[1], lc[2]);
     }
 }
 static void lodSubir(LodTile& t) {
@@ -792,7 +870,7 @@ static void anclarActualizar(double px, double pz) {
         if (cerca(cx, cz)) continue;
         for (int cy = 0; cy < HYC; cy++) {
             if (buscar(cx, cy, cz)) continue;
-            if (g_genPend.load() >= g_hilos * 6) break;
+            if (g_genPend.load() >= genMax()) break;
             auto c = std::make_shared<Chunk>(cx, cy, cz);
             g_mapa[clave(cx, cy, cz)] = c;
             pedirGenerar(c);
@@ -806,7 +884,7 @@ static void anclarActualizar(double px, double pz) {
             ChunkP c = buscar(cx, cy, cz);
             if (!c || c->state.load(std::memory_order_acquire) != ST_READY) continue;
             if (!c->dat.d && c->dat.uni == AIRE) { c->state.store(ST_MESHED); continue; }
-            if (g_meshPend.load() < g_hilos * 4) pedirMalla(c, 0);
+            if (g_meshPend.load() < mallaMax()) pedirMalla(c, 0);
         }
     }
     // mascara: columnas editadas que ya estan completamente dibujadas con chunks reales
@@ -839,14 +917,16 @@ static void escanearEditados() {
 static void guardarOpciones() {
     FILE* f = std::fopen("opciones.txt", "w");
     if (!f) return;
-    std::fprintf(f, "mundo_lejano=%d\ncambios_lejanos=%d\ngraficos=%d\n", g_lodOn ? 1 : 0, g_anclaOn ? 1 : 0, g_graf ? 1 : 0);
+    std::fprintf(f, "mundo_lejano=%d\ncambios_lejanos=%d\ngraficos=%d\nrendimiento=%d\nconservar=%d\n", g_lodOn ? 1 : 0, g_anclaOn ? 1 : 0, g_graf ? 1 : 0, g_perf, g_conservar ? 1 : 0);
     std::fclose(f);
 }
 static void cargarOpciones() {
     FILE* f = std::fopen("opciones.txt", "r");
     if (!f) return;
-    int v = 1, w = 1, g = 1;
-    if (std::fscanf(f, "mundo_lejano=%d cambios_lejanos=%d graficos=%d", &v, &w, &g) >= 1) { g_lodOn = v != 0; g_anclaOn = w != 0; g_graf = g != 0; }
+    int v = 1, w = 1, g = 1, pf = 0, cs = 0;
+    int nl = std::fscanf(f, "mundo_lejano=%d cambios_lejanos=%d graficos=%d rendimiento=%d conservar=%d", &v, &w, &g, &pf, &cs);
+    if (nl >= 1) { g_lodOn = v != 0; g_anclaOn = w != 0; g_graf = g != 0; }
+    if (nl >= 5) { g_perf = std::max(0, std::min(2, pf)); g_conservar = cs != 0; }
     std::fclose(f);
 }
 
@@ -897,6 +977,7 @@ static void moverEje(int eje, double delta) {
 }
 
 static std::string archivoJugador() { return g_dir + "/jugador.txt"; }
+static std::string archivoBarra() { return g_dir + "/barra.txt"; }
 static std::string g_nombreMundo = "MUNDO";
 static int g_material = PASTO;
 static bool g_pincelBloque = false;
@@ -914,12 +995,132 @@ static const char* NOMBRES_SLOT[NTIPOS] = {"DESTRUIR", "PASTO", "TIERRA", "PIEDR
                                            "LED CELESTE", "LED AZUL", "LED VIOLETA", "LED MAGENTA", "LED ROSA", "LED BLANCO",
                                            "VIDRIO", "CARROCERIA", "ASIENTO", "TIMON", "ALA", "RUEDA", "HELICE", "CONTROL",
                                            "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA",
-                                           "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA"};
-static const char* nombreSlot(int t) { return t == ID_SPRAY ? "SPRAY" : (t >= 0 && t < NTIPOS) ? NOMBRES_SLOT[t] : ""; }
+                                           "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA",
+                                           "NIEVE", "HIELO", "CACTUS", "HOJAS ROJAS", "HOJAS NARANJA", "HOJAS AMARILLAS", "HOJAS ROSAS", "PINO", "PASTO SECO"};
+// ---- herramientas (ids 230..241) y modo survival
+static const int HERR_BASE = 230, HERR_N = 12;
+static inline bool esHerr(int id) { return id >= HERR_BASE && id < HERR_BASE + HERR_N; }
+static inline int herrTipo(int id) { return (id - HERR_BASE) / 4; }    // 0 pico, 1 hacha, 2 pala
+static inline int herrNivel(int id) { return (id - HERR_BASE) % 4; }   // 0 madera, 1 piedra, 2 hierro, 3 diamante
+static const char* NOMBRES_HERR[HERR_N] = {"PICO MADERA", "PICO PIEDRA", "PICO HIERRO", "PICO DIAMANTE",
+                                           "HACHA MADERA", "HACHA PIEDRA", "HACHA HIERRO", "HACHA DIAMANTE",
+                                           "PALA MADERA", "PALA PIEDRA", "PALA HIERRO", "PALA DIAMANTE"};
+static const char* nombreSlot(int t) {
+    if (t == ID_SPRAY) return "SPRAY";
+    if (esHerr(t)) return NOMBRES_HERR[t - HERR_BASE];
+    return (t >= 0 && t < NTIPOS) ? NOMBRES_SLOT[t] : "";
+}
+static bool g_survival = false, g_spawnOk = false;
+static int g_inv[256];                                  // cuantos cubitos (o piezas) tienes de cada objeto
+static float g_vida = 20.0f;                            // 20 = 10 corazones
+static double g_vidaT = 0, g_danoFlash = -10, g_caidaMax = 0, g_spawnS[3] = {0, 0, 0};
+static double g_protT = 0;                              // sin dano de caida hasta este instante (tras reaparecer)
+static int g_pagina = 0;                                // en el menu survival: 0 objetos, 1 recetas
+struct Receta { int out, n, a, na, b, nb; };
+static const std::vector<Receta>& recetas() {
+    static std::vector<Receta> r;
+    if (r.empty()) {
+        const int cm[4][2] = {{24, 0}, {16, 24}, {16, 24}, {16, 24}};          // madera y material del cabezal (pico y hacha)
+        const int cp[4][2] = {{16, 0}, {8, 16}, {8, 16}, {8, 16}};              // pala
+        const int mat[4] = {MADERA, PIEDRA, HIERRO, DIAMANTE};
+        for (int ti = 0; ti < 3; ti++) for (int nv = 0; nv < 4; nv++) {
+            const int* c = ti == 2 ? cp[nv] : cm[nv];
+            if (nv == 0) r.push_back({HERR_BASE + ti * 4, 1, MADERA, c[0], 0, 0});
+            else r.push_back({HERR_BASE + ti * 4 + nv, 1, MADERA, c[0], mat[nv], c[1]});
+        }
+        r.push_back({ANTORCHA, 4, MADERA, 2, CARBON, 1});
+        r.push_back({VIDRIO, 4, ARENA, 8, 0, 0});
+        r.push_back({CARROCERIA, 8, HIERRO, 8, 0, 0});
+        r.push_back({ASIENTO, 4, MADERA, 8, HIERRO, 4});
+        r.push_back({TIMON, 1, HIERRO, 8, 0, 0});
+        r.push_back({ALA, 8, ALUMINIO, 8, 0, 0});
+        r.push_back({RUEDA, 8, CARBON, 8, HIERRO, 4});
+        r.push_back({HELICE, 4, ALUMINIO, 8, 0, 0});
+        r.push_back({CONTROL, 1, COBRE, 4, HIERRO, 4});
+        r.push_back({ID_SPRAY, 1, ALUMINIO, 8, CARBON, 4});
+    }
+    return r;
+}
+static bool puedeCraftear(const Receta& r) { return g_inv[r.a] >= r.na && (r.nb == 0 || g_inv[r.b] >= r.nb); }
+static int survClase(int tp) {   // 0 pala, 1 hacha, 2 pico, 3 sin herramienta
+    if (tp == PASTO || tp == TIERRA || tp == ARENA || tp == ARCILLA || tp == NIEVE || tp == PASTO_SECO) return 0;
+    if (tp == MADERA || esHoja(tp) || tp == CACTUS) return 1;
+    if (tp == HIELO) return 2;
+    if (tp == PIEDRA || (tp >= CARBON && tp <= URANIO && tp != ARCILLA && tp != ANTORCHA) || tp == AZUFRE || tp == SALITRE) return 2;
+    return 3;
+}
+static int survNivelNec(int tp) {   // nivel de pico necesario (0 = ninguno)
+    switch (tp) {
+        case PIEDRA: case CARBON: case ESTANO: return 1;
+        case HIERRO: case COBRE: case ALUMINIO: case PLATA: case CUARZO: case AZUFRE: case SALITRE: return 2;
+        case ORO: case DIAMANTE: case TITANIO: case LITIO: case URANIO: return 3;
+        default: return 0;
+    }
+}
+static bool survPicoOK(int tp, int mat) {
+    int have = (esHerr(mat) && herrTipo(mat) == 0) ? herrNivel(mat) + 1 : 0;
+    return have >= survNivelNec(tp);
+}
+static int survDrop(int tp) {
+    if (tp == AIRE || (tp >= AGUA && tp <= AGUA) || (tp >= AGUA_F1 && tp <= AGUA_F8)) return -1;
+    if (tp >= CARR_0 && tp <= CARR_11) return CARROCERIA;
+    return tp;
+}
+static double survCooldown(int tp, int mat) {   // segundos entre cubitos picados
+    int cl = survClase(tp);
+    double dur = cl == 0 ? 0.8 : cl == 1 ? 1.4 : cl == 2 ? (survNivelNec(tp) >= 2 ? 3.0 : 2.2) : 1.0;
+    double vel = 1.0;
+    static const double V[4] = {2.0, 3.5, 5.0, 7.0};
+    if (cl < 3 && esHerr(mat) && herrTipo(mat) == (cl == 0 ? 2 : cl == 1 ? 1 : 0)) vel = V[herrNivel(mat)];
+    return std::max(0.05, 0.18 * dur / vel);
+}
+static void survDano(float hp) { g_vida -= hp; g_danoFlash = glfwGetTime(); }
+static const int VACIO = -1;                                                                  // casilla vacia (mano libre: solo rompe)
 static int g_barra[9] = {0, PASTO, TIERRA, PIEDRA, ARENA, MADERA, HOJAS, CARBON, ANTORCHA};   // barra de 9 casillas
+static int g_mano = -100, g_manoOrigen = -1;      // objeto agarrado en el menu (-100 = nada) y de que casilla de la barra vino (-1 = del menu)
+static double g_manoX = 0, g_manoY = 0;           // donde se pulso, para distinguir clic de arrastre
 static int g_sel = 1;                                                                        // casilla elegida
 static void aplicarSel() { g_material = g_barra[g_sel]; g_destruir = g_material == 0; }
+static std::string archivoBarra();
+static void guardarBarra() {
+    FILE* f = std::fopen(archivoBarra().c_str(), "w");
+    if (!f) return;
+    for (int i = 0; i < 9; i++) std::fprintf(f, "%d ", g_barra[i]);
+    std::fclose(f);
+}
+static void cargarBarra() {
+    FILE* f = std::fopen(archivoBarra().c_str(), "r");
+    if (!f) return;
+    int v[9]; bool ok = true;
+    for (int i = 0; i < 9 && ok; i++) ok = std::fscanf(f, "%d", &v[i]) == 1;
+    std::fclose(f);
+    if (!ok) return;
+    for (int i = 0; i < 9; i++) if (v[i] == VACIO || v[i] == ID_SPRAY || (v[i] >= 0 && v[i] < NTIPOS)) g_barra[i] = v[i];
+    aplicarSel();
+}
+static std::string archivoSurv() { return g_dir + "/survival.txt"; }
+static void guardarSurv() {
+    FILE* f = std::fopen(archivoSurv().c_str(), "w");
+    if (!f) return;
+    std::fprintf(f, "%d %.2f %.4f %.4f %.4f %d\n", g_survival ? 1 : 0, g_vida, g_spawnS[0], g_spawnS[1], g_spawnS[2], g_spawnOk ? 1 : 0);
+    for (int i = 0; i < 256; i++) std::fprintf(f, "%d ", g_inv[i]);
+    std::fclose(f);
+}
+static void cargarSurv() {
+    for (int i = 0; i < 256; i++) g_inv[i] = 0;
+    g_survival = false; g_vida = 20.0f; g_spawnOk = false;
+    FILE* f = std::fopen(archivoSurv().c_str(), "r");
+    if (!f) return;
+    int sv = 0, ok = 0; float v = 20; double sx, sy, sz;
+    if (std::fscanf(f, "%d %f %lf %lf %lf %d", &sv, &v, &sx, &sy, &sz, &ok) == 6) {
+        g_survival = sv != 0; g_vida = std::max(1.0f, std::min(20.0f, v)); g_spawnS[0] = sx; g_spawnS[1] = sy; g_spawnS[2] = sz; g_spawnOk = ok != 0;
+        for (int i = 0; i < 256; i++) { int c = 0; if (std::fscanf(f, "%d", &c) != 1) break; g_inv[i] = std::max(0, std::min(9999, c)); }
+    }
+    std::fclose(f);
+}
 static void guardarJugador() {
+    guardarBarra();
+    guardarSurv();
     std::error_code ec;
     std::filesystem::create_directories(g_dir, ec);
     FILE* f = std::fopen(archivoJugador().c_str(), "w");
@@ -929,6 +1130,8 @@ static void guardarJugador() {
     std::fclose(f);
 }
 static bool cargarJugador() {
+    cargarSurv();
+    cargarBarra();
     FILE* f = std::fopen(archivoJugador().c_str(), "r");
     if (!f) return false;
     int vol = 0, mat = PASTO, pin = 0;
@@ -1063,6 +1266,17 @@ void main(){
     else if (tipo == 49) col = vec3(0.07,0.07,0.08);
     else if (tipo == 50) col = vec3(0.55,0.38,0.20);
     else if (tipo == 51) col = vec3(0.95,0.65,0.10);
+    else if (tipo >= 64) {
+        if (tipo == 64) col = vec3(0.93,0.95,0.99);                       // nieve
+        else if (tipo == 65) col = vec3(0.60,0.80,0.96);                  // hielo
+        else if (tipo == 66) col = (cara == 2) ? vec3(0.30,0.58,0.26) : vec3(0.20,0.50,0.22);   // cactus
+        else if (tipo == 67) col = vec3(0.78,0.13,0.10);                  // hojas rojas
+        else if (tipo == 68) col = vec3(0.93,0.47,0.08);                  // hojas naranjas
+        else if (tipo == 69) col = vec3(0.94,0.80,0.13);                  // hojas amarillas
+        else if (tipo == 70) col = vec3(0.98,0.64,0.78);                  // hojas rosas (cerezo)
+        else if (tipo == 71) col = vec3(0.09,0.33,0.19);                  // pino
+        else col = (cara == 2) ? vec3(0.66,0.60,0.30) : vec3(0.45,0.32,0.20);   // pasto seco
+    }
     else if (tipo >= 52) col = CARRC[tipo - 52];
     else if (tipo >= 32) col = LEDC[tipo - 32];
     else {
@@ -1272,6 +1486,7 @@ constexpr bool SOLO_VISIBLE = true;      // celular: tambien sin mundo lejano se
 constexpr bool SOLO_VISIBLE = false;
 #endif
 #include "vehiculo.h"
+#include "jugadores.h"
 
 
 // ---------------------------------------------------------------- mundos (menu que aparece al iniciar)
@@ -1401,11 +1616,14 @@ static void alMouse(GLFWwindow*, double x, double y) {
     g_j.pitch = std::max(-1.55, std::min(1.55, g_j.pitch));
     g_mx = x; g_my = y;
 }
+static void menuReconstruir();
 static void abrirMenu(GLFWwindow* w) {
+    g_pagina = 0; menuReconstruir();
     g_menu = true; g_capturado = false;
     glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 }
 static void cerrarMenu(GLFWwindow* w) {
+    g_mano = -100; g_manoOrigen = -1; guardarBarra();
     g_menu = false; g_capturado = true; g_primerMouse = true;
     glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 }
@@ -1413,12 +1631,12 @@ static void abrirPausa(GLFWwindow* w) { g_pausa = true; g_capturado = false; glf
 static void reanudar(GLFWwindow* w) { g_pausa = false; g_capturado = true; g_primerMouse = true; glfwSetInputMode(w, GLFW_CURSOR, GLFW_CURSOR_DISABLED); }
 // botones de la pausa: 0 continuar, 1 mundo lejano, 2 cambios lejanos, 3 graficos, 4 guardar y salir
 static MRect pausaRect(int fbw, int fbh, int i) {
-    float k = std::max(0.8f, fbh / 720.0f), w = 420 * k, h = 58 * k, gap = 16 * k;
-    return {(fbw - w) / 2.0f, fbh * 0.30f + i * (h + gap), w, h};
+    float k = std::max(0.8f, fbh / 720.0f), w = 420 * k, h = 44 * k, gap = 8 * k;
+    return {(fbw - w) / 2.0f, fbh * 0.28f + i * (h + gap), w, h};
 }
 static int pausaHit(double mx, double my) {
     double px = mx * g_fbW / std::max(1, g_winW), py = my * g_fbH / std::max(1, g_winH);
-    for (int i = 0; i < 5; i++) if (mDentro(pausaRect(g_fbW, g_fbH, i), px, py)) return i;
+    for (int i = 0; i < 8; i++) if (mDentro(pausaRect(g_fbW, g_fbH, i), px, py)) return i;
     return -1;
 }
 static void alRueda(GLFWwindow*, double, double dy) {
@@ -1431,23 +1649,96 @@ static void alRueda(GLFWwindow*, double, double dy) {
 static float g_k = 1.0f;
 static void menuGeom(int fbw, int fbh, int i, float& x, float& y, float& s) {
     float k = std::max(0.8f, fbh / 720.0f);
-    s = 58.0f * k;
-    float gap = 22.0f * k;
-    float total = 9 * s + 8 * gap;
-    float x0 = (fbw - total) / 2.0f, y0 = fbh * 0.13f;
-    x = x0 + (i % 9) * (s + gap);
-    y = y0 + (i / 9) * (s + gap + 22.0f * k);
+    s = 46.0f * k;
+    float gap = 24.0f * k;
+    float total = 10 * s + 9 * gap;
+    float x0 = (fbw - total) / 2.0f, y0 = fbh * 0.17f;
+    x = x0 + (i % 10) * (s + gap);
+    y = y0 + (i / 10) * (s + gap + 18.0f * k);
+}
+static std::vector<int> g_menuItems;       // objetos que muestra el menu (creativo: todos; survival: los que tienes)
+static void menuReconstruir() {
+    g_menuItems.clear();
+    if (!g_survival) {
+        for (int i = 0; i < NTIPOS_MENU; i++) g_menuItems.push_back(menuTipo(i));
+        for (int t = 0; t < HERR_N; t++) g_menuItems.push_back(HERR_BASE + t);
+    } else {
+        for (int id = 1; id < 256; id++) if (g_inv[id] > 0 && !(id >= AGUA_F1 && id <= AGUA_F8) && id != AGUA) g_menuItems.push_back(id);
+    }
+}
+static MRect recRect(int fbw, int fbh, int i) {   // recetas en dos columnas
+    float k = std::max(0.8f, fbh / 720.0f), w = 400 * k, gap = 20 * k, h = 37 * k;
+    float x0 = (fbw - (2 * w + gap)) / 2.0f;
+    return {x0 + (i / 11) * (w + gap), fbh * 0.17f + (i % 11) * 42 * k, w, h};
+}
+static MRect tabRect(int fbw, int fbh, int j) {
+    float k = std::max(0.8f, fbh / 720.0f);
+    return {fbw - (2 - j) * (138 * k) - 12 * k, 36 * k, 130 * k, 30 * k};
 }
 static int menuTileEn(double mx, double my) {
     double px = mx * g_fbW / std::max(1, g_winW), py = my * g_fbH / std::max(1, g_winH);
-    for (int i = 0; i < NTIPOS_MENU; i++) {
+    for (int i = 0; i < (int)g_menuItems.size(); i++) {
         float x, y, sz;
         menuGeom(g_fbW, g_fbH, i, x, y, sz);
-        if (px >= x && px <= x + sz && py >= y && py <= y + sz) return menuTipo(i);
+        if (px >= x && px <= x + sz && py >= y && py <= y + sz) return g_menuItems[i];
     }
     return -1;
 }
+// geometria de la barra de acceso rapido (la usa el dibujo y el clic del menu)
+static void barraGeom(int fbw, int fbh, int i, float& x, float& y, float& S) {
+    float k = std::max(0.8f, fbh / 720.0f);
+    S = std::floor(48.0f * k);
+    float gap = std::floor(5.0f * k), total = 9 * S + 8 * gap, x0 = (fbw - total) / 2.0f;
+    x = x0 + i * (S + gap); y = fbh - S - 16 * k;
+}
+static int barraEn(double mx, double my) {
+    double px = mx * g_fbW / std::max(1, g_winW), py = my * g_fbH / std::max(1, g_winH);
+    for (int i = 0; i < 9; i++) {
+        float x, y, S;
+        barraGeom(g_fbW, g_fbH, i, x, y, S);
+        if (px >= x && px <= x + S && py >= y && py <= y + S) return i;
+    }
+    return -1;
+}
+// pone el objeto agarrado en la casilla j (si venia de otra casilla, intercambian)
+static void manoSoltarEn(int j) {
+    if (g_mano == -100 || j < 0) return;
+    if (g_manoOrigen >= 0 && g_manoOrigen != j) g_barra[g_manoOrigen] = g_barra[j];
+    g_barra[j] = g_mano;
+    g_mano = -100; g_manoOrigen = -1;
+    g_sel = j; aplicarSel(); guardarBarra();
+}
+static void survCraftear(int idx) {
+    const auto& R = recetas();
+    if (idx < 0 || idx >= (int)R.size()) return;
+    const Receta& r = R[idx];
+    if (!puedeCraftear(r)) { g_aviso = "TE FALTAN MATERIALES"; g_avisoT = glfwGetTime(); return; }
+    g_inv[r.a] -= r.na; if (r.nb) g_inv[r.b] -= r.nb;
+    g_inv[r.out] = std::min(9999, g_inv[r.out] + r.n);
+    g_aviso = std::string("FABRICADO: ") + nombreSlot(r.out); g_avisoT = glfwGetTime();
+    guardarSurv();
+}
+static void survCambiarModo() {
+    g_survival = !g_survival;
+    if (g_survival) {
+        if (!g_spawnOk) { g_spawnS[0] = g_j.p.x; g_spawnS[1] = g_j.p.y; g_spawnS[2] = g_j.p.z; g_spawnOk = true; }
+        g_vida = 20.0f; g_j.volar = false; g_caidaMax = g_j.p.y;
+        for (int i = 0; i < 9; i++) if (g_barra[i] == 0) g_barra[i] = VACIO;
+        g_aviso = "SURVIVAL: PICA PARA CONSEGUIR MATERIALES (E: INVENTARIO Y RECETAS)";
+    } else g_aviso = "MODO CREATIVO";
+    g_avisoT = glfwGetTime();
+    aplicarSel(); guardarSurv(); guardarBarra();
+}
+static void alChar(GLFWwindow*, unsigned int cp) {
+    if (g_chat && cp >= 32 && cp < 127 && g_chatBuf.size() < 100) g_chatBuf += (char)cp;
+}
 static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
+    if (g_chat && (accion == GLFW_PRESS || accion == GLFW_REPEAT)) {      // escribiendo un mensaje
+        if (tecla == GLFW_KEY_ESCAPE) g_chat = false;
+        else if (tecla == GLFW_KEY_ENTER || tecla == GLFW_KEY_KP_ENTER) { if (!g_chatBuf.empty()) g_red.chatEnviar(g_chatBuf); g_chatBuf.clear(); g_chat = false; }
+        else if (tecla == GLFW_KEY_BACKSPACE && !g_chatBuf.empty()) g_chatBuf.pop_back();
+        return;
+    }
     if (accion != GLFW_PRESS) return;
     if (g_pantalla == 0) {
         if (tecla == GLFW_KEY_ESCAPE) { if (g_confBorrar >= 0) g_confBorrar = -1; else glfwSetWindowShouldClose(w, 1); }
@@ -1462,6 +1753,7 @@ static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
         return;
     }
     if (g_pausa) return;
+    if (tecla == GLFW_KEY_ENTER && g_red.activo() && !g_menu) { g_chat = true; g_chatBuf.clear(); return; }     // abrir el chat
     if (g_veh.activo && g_veh.pilotando) {      // mientras vuelas solo valen estas teclas
         if (tecla == GLFW_KEY_G) g_pedirG = true;
         else if (tecla == GLFW_KEY_TAB) g_veh.cabina = !g_veh.cabina;
@@ -1471,6 +1763,7 @@ static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
         return;
     }
     if (tecla == GLFW_KEY_E) { if (g_menu) cerrarMenu(w); else abrirMenu(w); }
+    if (tecla == GLFW_KEY_TAB && g_menu && g_survival) g_pagina ^= 1;
     if (g_menu) return;
     if (tecla == GLFW_KEY_G) g_pedirG = true;
     if (tecla == GLFW_KEY_H) g_pedirH = true;
@@ -1479,20 +1772,28 @@ static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
         if (g_material == ID_SPRAY) g_sprayColor = (g_sprayColor + d + 12) % 12;
         else if (g_material == RUEDA) g_ruedaD = std::max(2, std::min(24, g_ruedaD + d));
     }
-    if (tecla == GLFW_KEY_F) { g_j.volar = !g_j.volar; g_j.v = {0, 0, 0}; }
+    if (tecla == GLFW_KEY_F && !g_survival) { g_j.volar = !g_j.volar; g_j.v = {0, 0, 0}; }
     if (tecla == GLFW_KEY_SPACE) {
         double t = glfwGetTime();
-        if (t - g_ultEspacio < 0.30) { g_j.volar = !g_j.volar; g_j.v = {0, 0, 0}; g_ultEspacio = -10; }
+        if (t - g_ultEspacio < 0.30) { if (!g_survival) { g_j.volar = !g_j.volar; g_j.v = {0, 0, 0}; } g_ultEspacio = -10; }
         else g_ultEspacio = t;
     }
     if (tecla == GLFW_KEY_T) g_hora = std::fmod(std::floor(g_hora * 4.0 + 1e-6) * 0.25 + 0.25, 1.0);   // saltar a la siguiente fase del dia
     if (tecla == GLFW_KEY_F5) g_guardarYa = true;
     if (tecla == GLFW_KEY_B || tecla == GLFW_KEY_LEFT_CONTROL) g_pincelBloque = !g_pincelBloque;
     if (tecla == GLFW_KEY_V) { g_vsync = !g_vsync; glfwSwapInterval(g_vsync ? 1 : 0); }
-    if (tecla == GLFW_KEY_X || tecla == GLFW_KEY_0) { g_barra[g_sel] = 0; aplicarSel(); }
+    if (tecla == GLFW_KEY_X || tecla == GLFW_KEY_0) { g_barra[g_sel] = VACIO; aplicarSel(); }
     if (tecla >= GLFW_KEY_1 && tecla <= GLFW_KEY_9) { g_sel = tecla - GLFW_KEY_1; aplicarSel(); }
 }
 static void alClic(GLFWwindow* w, int boton, int accion, int) {
+    if (accion == GLFW_RELEASE && g_menu && g_pantalla != 0 && !g_pausa && boton == GLFW_MOUSE_BUTTON_LEFT && g_mano != -100) {
+        double dx = g_mx - g_manoX, dy = g_my - g_manoY;
+        if (dx * dx + dy * dy > 36.0) {                       // fue un arrastre: soltar donde esta el cursor (si no hay casilla, se cancela)
+            int j = barraEn(g_mx, g_my);
+            if (j >= 0) manoSoltarEn(j); else { g_mano = -100; g_manoOrigen = -1; }
+        }                                                      // si fue un simple clic, el objeto queda agarrado hasta elegir casilla
+        return;
+    }
     if (accion != GLFW_PRESS) return;
     if (g_pantalla == 0) {
         if (boton != GLFW_MOUSE_BUTTON_LEFT) return;
@@ -1512,13 +1813,37 @@ static void alClic(GLFWwindow* w, int boton, int accion, int) {
         else if (b == 1) { g_lodOn = !g_lodOn; guardarOpciones(); if (!g_lodOn) lodLiberarTodo(); }
         else if (b == 2) { g_anclaOn = !g_anclaOn; guardarOpciones(); }
         else if (b == 3) { g_graf = !g_graf; guardarOpciones(); }
-        else if (b == 4) glfwSetWindowShouldClose(w, 1);
+        else if (b == 4) survCambiarModo();
+        else if (b == 5) { g_perf = (g_perf + 1) % 3; aplicarPerf(); guardarOpciones(); }
+        else if (b == 6) { g_conservar = !g_conservar; guardarOpciones(); }
+        else if (b == 7) glfwSetWindowShouldClose(w, 1);
         return;
     }
     if (g_menu) {
-        if (boton == GLFW_MOUSE_BUTTON_LEFT) {
-            int t = menuTileEn(g_mx, g_my);
-            if (t >= 0) { g_barra[g_sel] = t; aplicarSel(); cerrarMenu(w); }
+        int j = barraEn(g_mx, g_my);
+        if (g_survival && boton == GLFW_MOUSE_BUTTON_LEFT) {   // pestanas y recetas
+            double qx = g_mx * g_fbW / std::max(1, g_winW), qy = g_my * g_fbH / std::max(1, g_winH);
+            for (int tj = 0; tj < 2; tj++) if (mDentro(tabRect(g_fbW, g_fbH, tj), qx, qy)) { g_pagina = tj; return; }
+            if (g_pagina == 1) {
+                for (int ri = 0; ri < (int)recetas().size(); ri++) if (mDentro(recRect(g_fbW, g_fbH, ri), qx, qy)) { survCraftear(ri); menuReconstruir(); return; }
+            }
+        }
+        if (boton == GLFW_MOUSE_BUTTON_RIGHT) {                // clic derecho: soltar lo agarrado o vaciar la casilla
+            if (g_mano != -100) { g_mano = -100; g_manoOrigen = -1; }
+            else if (j >= 0) { g_barra[j] = VACIO; if (j == g_sel) aplicarSel(); guardarBarra(); }
+            return;
+        }
+        if (boton != GLFW_MOUSE_BUTTON_LEFT) return;
+        g_manoX = g_mx; g_manoY = g_my;
+        if (j >= 0) {
+            if (g_mano != -100) manoSoltarEn(j);
+            else {
+                g_sel = j; aplicarSel();
+                if (g_barra[j] != VACIO) { g_mano = g_barra[j]; g_manoOrigen = j; }
+            }
+        } else {
+            int t = (g_survival && g_pagina == 1) ? -1 : menuTileEn(g_mx, g_my);
+            if (t >= 0) { g_mano = t; g_manoOrigen = -1; } else { g_mano = -100; g_manoOrigen = -1; }
         }
         return;
     }
@@ -1620,9 +1945,7 @@ static float hh(int a, int b, int c) {
     h = (h ^ (h >> 13)) * 1274126177u;
     return (float)(h & 0xffff) / 65535.0f;
 }
-// icono de un material (o de la herramienta "destruir" en el hueco 0)
-static void hIcono(int slot, float x, float y, float s) {
-    static const float C[NTIPOS][3] = {{0.45f, 0.10f, 0.10f}, {0.34f, 0.64f, 0.21f}, {0.45f, 0.32f, 0.20f}, {0.50f, 0.50f, 0.52f},
+static const float ICON_C[NTIPOS][3] = {{0.45f, 0.10f, 0.10f}, {0.34f, 0.64f, 0.21f}, {0.45f, 0.32f, 0.20f}, {0.50f, 0.50f, 0.52f},
                                        {0.86f, 0.80f, 0.55f}, {0.18f, 0.38f, 0.80f}, {0.40f, 0.28f, 0.15f}, {0.20f, 0.52f, 0.16f},
                                        {0.07f, 0.07f, 0.08f}, {0.80f, 0.60f, 0.47f}, {0.82f, 0.47f, 0.22f}, {0.96f, 0.80f, 0.18f},
                                        {0.30f, 0.92f, 0.95f}, {0.95f, 0.94f, 0.92f}, {0.62f, 0.64f, 0.72f},
@@ -1631,6 +1954,10 @@ static void hIcono(int slot, float x, float y, float s) {
                                        {0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0}, {0.90f, 0.92f, 0.28f}, {0.93f, 0.82f, 0.80f},
                                        {1.0f, 0.10f, 0.10f}, {1.0f, 0.48f, 0.08f}, {1.0f, 0.90f, 0.15f}, {0.60f, 1.0f, 0.12f}, {0.10f, 1.0f, 0.20f}, {0.08f, 1.0f, 0.80f},
                                        {0.15f, 0.70f, 1.0f}, {0.15f, 0.20f, 1.0f}, {0.55f, 0.18f, 1.0f}, {1.0f, 0.15f, 0.80f}, {1.0f, 0.50f, 0.72f}, {1.0f, 1.0f, 1.0f}};
+static const float ICON_NEW[9][3] = {{0.93f, 0.95f, 0.99f}, {0.60f, 0.80f, 0.96f}, {0.25f, 0.55f, 0.25f}, {0.78f, 0.13f, 0.10f}, {0.93f, 0.47f, 0.08f}, {0.94f, 0.80f, 0.13f}, {0.98f, 0.64f, 0.78f}, {0.09f, 0.33f, 0.19f}, {0.66f, 0.60f, 0.30f}};
+static inline const float* iconColor(int id) { return id >= NIEVE ? ICON_NEW[id - NIEVE] : ICON_C[id]; }
+// icono de un material (o de la herramienta "destruir" en el hueco 0)
+static void hIcono(int slot, float x, float y, float s) {
     const int N = 6;
     float c = s / N;
     if (slot == ID_SPRAY) {   // lata de spray con la tapa del color elegido
@@ -1641,7 +1968,18 @@ static void hIcono(int slot, float x, float y, float s) {
         hRect(x + 3 * c, y + 0 * c - c * 0.5f, c, c * 0.6f, 0.9f, 0.9f, 0.9f);
         return;
     }
-    if (slot >= VIDRIO) {   // piezas de vehiculo
+    if (esHerr(slot)) {   // herramienta: mango de madera y cabezal del color del material
+        static const float HC[4][3] = {{0.62f, 0.44f, 0.22f}, {0.55f, 0.55f, 0.58f}, {0.88f, 0.88f, 0.92f}, {0.30f, 0.92f, 0.95f}};
+        const float* h = HC[herrNivel(slot)];
+        auto P = [&](int i, int j, float r, float g, float b) { hRect(x + i * c, y + j * c, c + 0.5f, c + 0.5f, r, g, b); };
+        for (int d = 0; d < 5; d++) P(d, N - 1 - d, 0.42f, 0.28f, 0.12f);                       // mango en diagonal
+        int ti = herrTipo(slot);
+        if (ti == 0) { for (int i = 1; i < 6; i++) P(i, 0, h[0], h[1], h[2]); P(1, 1, h[0], h[1], h[2]); P(5, 1, h[0], h[1], h[2]); P(3, 1, 0.42f, 0.28f, 0.12f); }
+        else if (ti == 1) { for (int j = 0; j < 3; j++) for (int i = 3; i < 6; i++) P(i, j, h[0], h[1], h[2]); P(2, 1, h[0], h[1], h[2]); }
+        else { for (int j = 0; j < 2; j++) for (int i = 3; i < 6; i++) P(i, j, h[0], h[1], h[2]); P(2, 2, h[0], h[1], h[2]); P(4, 2, h[0], h[1], h[2]); }
+        return;
+    }
+    if (slot >= VIDRIO && slot < NIEVE) {   // piezas de vehiculo
         float pc[3]; colorPieza((uint8_t)slot, pc);
         for (int j = 0; j < N; j++) for (int i = 0; i < N; i++) {
             float v = 1.0f + (hh(i, j, slot) - 0.5f) * 0.16f;
@@ -1656,9 +1994,9 @@ static void hIcono(int slot, float x, float y, float s) {
     }
     bool mineral = esMineral((uint8_t)slot);
     for (int j = 0; j < N; j++) for (int i = 0; i < N; i++) {
-        const float* col = C[slot];
+        const float* col = iconColor(slot);
         float r = col[0], g = col[1], b = col[2];
-        if (slot == 1 && j >= 2) { r = 0.45f; g = 0.32f; b = 0.20f; }      // pasto: costado de tierra
+        if ((slot == 1 || slot == PASTO_SECO) && j >= 2) { r = 0.45f; g = 0.32f; b = 0.20f; }      // pasto: costado de tierra
         if (mineral && hh(i, j, 99) <= 0.55f) { r = 0.50f; g = 0.50f; b = 0.52f; }   // roca con vetas de mineral
         float v = 1.0f + (hh(i, j, slot) - 0.5f) * 0.22f;
         hRect(x + i * c, y + j * c, c + 0.5f, c + 0.5f, r * v, g * v, b * v);
@@ -1697,6 +2035,162 @@ static void tactilDibujar(int fbw, int fbh, float t) {
     }
 }
 #endif
+// ---------------------------------------------------------------- red: avioneta compartida y chat
+static void vehLiberarMallas() {
+    g_veh.cuerpo.liberar(); g_veh.vidrio.liberar();
+    for (auto& h : g_veh.helices) h.malla.liberar();
+    g_veh.helices.clear(); g_veh.pts.clear();
+}
+static void vehEnviarSet(int paraId) {      // paraId < 0: a todos
+    Veh& v = g_veh;
+    if (!v.activo) return;
+    RedW w; w.f((float)v.p.x); w.f((float)v.p.y); w.f((float)v.p.z); w.f((float)v.yaw); w.f((float)v.pitch); w.f((float)v.roll);
+    w.u32((uint32_t)v.celdas.size());
+    for (auto& c : v.celdas) { w.u32((uint32_t)c.x); w.u32((uint32_t)c.y); w.u32((uint32_t)c.z); w.u8(c.t); }
+    if (paraId < 0) g_red.difundir(RM_VEH_SET, w); else g_red.enviarA(paraId, RM_VEH_SET, w);
+}
+static void vehEnviarPose(int piloto) {
+    Veh& v = g_veh;
+    RedW w; w.u8((uint8_t)piloto);
+    w.f((float)v.p.x); w.f((float)v.p.y); w.f((float)v.p.z); w.f((float)v.yaw); w.f((float)v.pitch); w.f((float)v.roll);
+    w.f((float)v.v.x); w.f((float)v.v.y); w.f((float)v.v.z); w.f((float)v.gas); w.u8(v.suelo ? 1 : 0);
+    g_red.difundir(RM_VEH_POSE, w);
+}
+static void vehRecibir(uint8_t tipo, RedR& r, int) {
+    Veh& v = g_veh;
+    if (tipo == RM_VEH_SET) {
+        if (v.pilotando) return;
+        float px = r.f(), py = r.f(), pz = r.f(), yw = r.f(), pt = r.f(), rl = r.f();
+        uint32_t n = r.u32();
+        if (!r.ok || n == 0 || n > 200000) return;
+        std::vector<VCelda> cs; cs.reserve(n);
+        for (uint32_t i = 0; i < n && r.ok; i++) { VCelda c; c.x = (int)r.u32(); c.y = (int)r.u32(); c.z = (int)r.u32(); c.t = r.u8(); cs.push_back(c); }
+        if (!r.ok) return;
+        if (g_sobreVeh) vehSalir();
+        vehLiberarMallas();
+        v.celdas.swap(cs);
+        v.p = {px, py, pz}; v.yaw = yw; v.pitch = pt; v.roll = rl; v.v = {0, 0, 0}; v.gas = 0;
+        v.activo = true; v.pilotando = false; v.suelo = true; v.pilotoRed = -1;
+        vehReconstruir(v);
+        v.objP = v.p; v.objYaw = yw; v.objPitch = pt; v.objRoll = rl; v.objV = {0, 0, 0}; v.objGas = 0; v.objSuelo = true; v.objValido = true;
+        aviso("OTRO JUGADOR ENSAMBLO UNA AVIONETA");
+    } else if (tipo == RM_VEH_CLEAR) {
+        if (!v.activo || v.pilotando) return;
+        if (g_sobreVeh) vehSalir();
+        vehLiberarMallas();
+        v.celdas.clear(); v.activo = false; v.objValido = false; v.pilotoRed = -1;
+        aviso("LA AVIONETA FUE DESARMADA");
+    } else if (tipo == RM_VEH_POSE) {
+        int piloto = r.u8();
+        float px = r.f(), py = r.f(), pz = r.f(), yw = r.f(), pt = r.f(), rl = r.f(), vx = r.f(), vy = r.f(), vz = r.f(), gs = r.f();
+        bool su = r.u8() != 0;
+        if (!r.ok || !v.activo || v.pilotando) return;
+        v.pilotoRed = piloto == 255 ? -1 : piloto;
+        v.objP = {px, py, pz}; v.objYaw = yw; v.objPitch = pt; v.objRoll = rl; v.objV = {vx, vy, vz}; v.objGas = gs; v.objSuelo = su; v.objValido = true;
+    }
+}
+static std::string chatNombre(int id) {
+    if (id == g_red.miId) return g_red.miNombre;
+    auto it = g_red.rem.find(id);
+    return it != g_red.rem.end() && !it->second.nombre.empty() ? it->second.nombre : "?";
+}
+static void chatRecibir(int id, const std::string& t) {
+    g_chatLog.push_back({chatNombre(id) + ": " + t, glfwGetTime()});
+    while (g_chatLog.size() > 40) g_chatLog.pop_front();
+    std::printf("CHAT %s: %s\n", chatNombre(id).c_str(), t.c_str());
+}
+static void redIniciarCallbacks() {
+    g_red.alMensaje = vehRecibir;
+    g_red.alChat = chatRecibir;
+    g_red.alNuevo = [](int id) { if (g_veh.activo) { vehEnviarSet(id); vehEnviarPose(g_veh.pilotando ? g_red.miId : (g_veh.pilotoRed >= 0 ? g_veh.pilotoRed : 255)); } };
+    g_vehHookSet = [] { if (g_red.activo()) vehEnviarSet(-1); };
+    g_vehHookClear = [] { if (g_red.activo()) { RedW w; g_red.difundir(RM_VEH_CLEAR, w); } };
+}
+
+// ---------------------------------------------------------------- red: ediciones remotas, nombres, informacion
+struct EtiquetaJ { float x, y; std::string txt; };
+static std::vector<EtiquetaJ> g_etiquetas;       // nombres de los otros jugadores (en pantalla)
+static std::string g_redInfo;                    // linea de estado de la red
+static std::unordered_map<int64_t, std::vector<RedEdit>> g_redPend;   // ediciones de chunks que aun no estan cargados
+static std::unordered_set<int64_t> g_redCols;    // anfitrion: columnas cerca de los demas jugadores (no se descargan)
+static bool redAplicarEdit(const RedEdit& e, std::vector<ChunkP>& su, int* b) {   // false si el chunk no esta listo
+    int cy = divPiso(e.y, CS);
+    if (cy < 0 || cy >= HYC) return true;
+    ChunkP c = buscar(divPiso(e.x, CS), cy, divPiso(e.z, CS));
+    if (!c || c->state.load(std::memory_order_acquire) < ST_READY) return false;
+    bool prev = g_redEnviar; g_redEnviar = false;
+    escribirCubito(e.x, e.y, e.z, e.t, su);
+    g_redEnviar = prev;
+    b[0] = std::min(b[0], e.x); b[1] = std::max(b[1], e.x); b[2] = std::min(b[2], e.y); b[3] = std::max(b[3], e.y); b[4] = std::min(b[4], e.z); b[5] = std::max(b[5], e.z);
+    return true;
+}
+static void redTerminarLote(std::vector<ChunkP>& su, int* b) {
+    for (auto& c : su) remallarAsync(c);
+    if (!su.empty()) marcarLuzSucia(b[0] - SUB, b[1] + SUB, b[2] - SUB, b[3] + SUB, b[4] - SUB, b[5] + SUB, su);
+}
+static void redRecibirEdits(const RedEdit* v, int n) {
+    std::vector<ChunkP> su; int b[6] = {1 << 30, -(1 << 30), 1 << 30, -(1 << 30), 1 << 30, -(1 << 30)};
+    for (int i = 0; i < n; i++) {
+        if (!redAplicarEdit(v[i], su, b)) g_redPend[clave(divPiso(v[i].x, CS), divPiso(v[i].y, CS), divPiso(v[i].z, CS))].push_back(v[i]);
+    }
+    redTerminarLote(su, b);
+}
+static void redPendientes() {
+    if (g_redPend.empty()) return;
+    std::vector<ChunkP> su; int b[6] = {1 << 30, -(1 << 30), 1 << 30, -(1 << 30), 1 << 30, -(1 << 30)};
+    for (auto it = g_redPend.begin(); it != g_redPend.end();) {
+        bool todo = true;
+        std::vector<RedEdit> resto;
+        for (auto& e : it->second) if (!redAplicarEdit(e, su, b)) { todo = false; resto.push_back(e); }
+        if (todo) it = g_redPend.erase(it); else { it->second.swap(resto); ++it; }
+    }
+    redTerminarLote(su, b);
+}
+
+static void itemColor(int id, float* rgb) {
+    rgb[0] = rgb[1] = rgb[2] = 0.7f;
+    if (id >= 0 && (id < VIDRIO || (id >= NIEVE && id < NTIPOS))) { const float* ic = iconColor(id); rgb[0] = ic[0]; rgb[1] = ic[1]; rgb[2] = ic[2]; }
+    else if (id >= VIDRIO && id < 250) colorPieza((uint8_t)id, rgb);
+}
+static bool itemHerrSprite(int id, float col[8][8][3], bool fill[8][8]) {
+    if (!esHerr(id)) return false;
+    for (int r = 0; r < 8; r++) for (int c = 0; c < 8; c++) fill[r][c] = false;
+    static const float HC[4][3] = {{0.62f, 0.44f, 0.22f}, {0.55f, 0.55f, 0.58f}, {0.88f, 0.88f, 0.92f}, {0.30f, 0.92f, 0.95f}};
+    const float* h = HC[herrNivel(id)];
+    auto P = [&](int x, int y, const float* c) { if (x >= 0 && x < 8 && y >= 0 && y < 8) { fill[y][x] = true; col[y][x][0] = c[0]; col[y][x][1] = c[1]; col[y][x][2] = c[2]; } };
+    const float mango[3] = {0.42f, 0.28f, 0.12f};
+    for (int d = 0; d < 6; d++) P(d, 7 - d, mango);
+    int ti = herrTipo(id);
+    if (ti == 0) { P(3, 0, h); P(4, 0, h); P(5, 0, h); P(6, 0, h); P(2, 1, h); P(7, 1, h); P(1, 2, h); P(7, 2, h); P(4, 1, mango); P(5, 2, mango); }
+    else if (ti == 1) { P(4, 0, h); P(5, 0, h); P(6, 0, h); P(4, 1, h); P(5, 1, h); P(6, 1, h); P(7, 1, h); P(5, 2, h); P(6, 2, h); P(7, 2, h); P(6, 3, h); }
+    else { P(5, 0, h); P(6, 0, h); P(5, 1, h); P(6, 1, h); P(7, 1, h); P(6, 2, h); P(7, 2, h); P(7, 3, h); P(6, 3, h); }
+    return true;
+}
+static bool g_golpea = false;   // este cuadro estas picando/poniendo (para la animacion de la mano y para los otros jugadores)
+static uint8_t objetoEnMano() {
+    if (g_material < 0 || g_material == 0) return 255;
+    if (g_survival && g_inv[g_material] <= 0) return 255;
+    return (uint8_t)g_material;
+}
+static void hBoton(const MRect& r, float k, float cr, float cg, float cb, bool hov, const char* txt, float px);
+static void hCantidad(int id, float x, float y, float s, float k, float t) {   // cantidad (solo survival) y oscurecer si no hay
+    if (!g_survival || id < 0) return;
+    int c = g_inv[id];
+    if (c <= 0) { hRect(x, y, s, s, 0, 0, 0, 0.6f); return; }
+    if (esHerr(id) || id == ID_SPRAY) return;
+    char b[16]; std::snprintf(b, sizeof b, "%d", c);
+    float px = std::max(2.0f, t - 1);
+    hTexto(b, x + s - hAncho(b, px) - 2 * k, y + s - 8 * px, px, 1, 1, 0.6f);
+}
+static void hCorazon(float x, float y, float s, int lleno) {   // lleno: 0 vacio, 1 medio, 2 entero
+    static const char* P[6] = {".##.##.", "#######", "#######", ".#####.", "..###..", "...#..."};
+    float c = s / 7.0f;
+    for (int j = 0; j < 6; j++) for (int i = 0; i < 7; i++) if (P[j][i] == '#') {
+        bool on = lleno == 2 || (lleno == 1 && i < 4);
+        if (on) hRect(x + i * c, y + j * c, c + 0.5f, c + 0.5f, 0.92f, 0.10f, 0.12f);
+        else hRect(x + i * c, y + j * c, c + 0.5f, c + 0.5f, 0.22f, 0.05f, 0.06f);
+    }
+}
 static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, double px_, double py_, double pz_) {
     float k = std::max(0.8f, fbh / 720.0f);
     float t = std::max(2.0f, std::floor(2.0f * k + 0.5f));           // tamano de pixel de letra
@@ -1707,6 +2201,32 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
     std::snprintf(b, sizeof b, "X %d  Y %d  Z %d", (int)std::floor(px_), (int)std::floor(py_), (int)std::floor(pz_)); hTexto(b, x, y, t, 0.9f, 0.9f, 0.9f); y += lh;
     hTexto(g_pincelBloque ? "BLOQUE 2X2 (CTRL)" : "CUBITO (CTRL)", x, y, t, 1.0f, 0.85f, 0.3f); y += lh;
     hTexto((g_veh.activo && g_veh.pilotando) ? "PILOTANDO" : g_j.volar ? "VOLANDO (F)" : "CAMINANDO (F)", x, y, t, 0.6f, 0.9f, 1.0f); y += lh;
+    if (!g_redInfo.empty()) { hTexto(g_redInfo.c_str(), x, y, t, 0.5f, 1.0f, 0.6f); y += lh; }
+    if (g_red.activo()) {
+        double nc = glfwGetTime();
+        float cy0 = fbh - 96 * k - (g_chat ? 0.0f : 0.0f);
+        int n = 0;
+        for (auto it = g_chatLog.rbegin(); it != g_chatLog.rend() && n < 8; ++it) {
+            double edad = nc - it->t;
+            if (!g_chat && edad > 12.0) break;
+            std::string tx = it->txt.size() > 70 ? it->txt.substr(0, 70) : it->txt;
+            float yy = cy0 - n * 11.0f * t, tw = hAncho(tx.c_str(), t);
+            hRect(10 * k, yy - t, tw + 6 * t, 10 * t, 0.0f, 0.0f, 0.0f);
+            hTexto(tx.c_str(), 12 * k, yy, t, 1.0f, 1.0f, 1.0f);
+            n++;
+        }
+        if (g_chat) {
+            std::string tx = "> " + g_chatBuf + ((int)(nc * 2) % 2 ? "_" : " ");
+            float yy = cy0 + 14.0f * t;
+            hRect(10 * k, yy - t, hAncho(tx.c_str(), t) + 6 * t, 10 * t, 0.0f, 0.0f, 0.0f);
+            hTexto(tx.c_str(), 12 * k, yy, t, 1.0f, 0.95f, 0.5f);
+        }
+    }
+    for (auto& e : g_etiquetas) {
+        float tw = hAncho(e.txt.c_str(), t);
+        hRect(e.x - tw / 2 - 3 * t, e.y - 2 * t, tw + 6 * t, 11 * t, 0.0f, 0.0f, 0.0f);
+        hTexto(e.txt.c_str(), e.x - tw / 2, e.y, t, 1, 1, 1);
+    }
     {
         double hh_ = std::fmod(6.0 + g_hora * 24.0, 24.0);
         std::snprintf(b, sizeof b, "HORA %02d:%02d (T)", (int)hh_, (int)((hh_ - (int)hh_) * 60.0));
@@ -1716,7 +2236,7 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
     if (guardado) { hTexto("GUARDADO", x, y, t, 0.5f, 1, 0.5f); y += lh; }
 #ifndef MOVIL
     {
-        const char* a = "E: MATERIALES";
+        const char* a = g_survival ? "E: INVENTARIO" : "E: MATERIALES";
         hTexto(a, fbw - hAncho(a, t) - 12 * k, 10 * k, t, 0.85f, 0.85f, 0.85f);
     }
 #endif
@@ -1728,19 +2248,28 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
         float sx = x0 + i * (S + gap);
         hRect(sx, y0, S, S, 0, 0, 0, 0.55f);
         float in = 5 * k;
-        hIcono(g_barra[i], sx + in, y0 + in, S - 2 * in);
+        if (g_barra[i] >= 0) { hIcono(g_barra[i], sx + in, y0 + in, S - 2 * in); hCantidad(g_barra[i], sx + in, y0 + in, S - 2 * in, k, t); }
         if (i == sel) hMarco(sx - 2 * k, y0 - 2 * k, S + 4 * k, S + 4 * k, std::max(2.0f, 3 * k), 1, 1, 1);
         else hMarco(sx, y0, S, S, std::max(1.0f, k), 0.45f, 0.45f, 0.45f);
         std::snprintf(b, sizeof b, "%d", i + 1);
         hTexto(b, sx + 4 * k, y0 + 3 * k, std::max(2.0f, t - 1), 1, 1, 1);
     }
+    if (g_survival && !(g_veh.activo && g_veh.pilotando)) {
+        float hs = 18 * k;
+        for (int i = 0; i < 10; i++) {
+            int lleno = g_vida >= 2 * (i + 1) ? 2 : (g_vida >= 2 * i + 1 ? 1 : 0);
+            hCorazon(x0 + i * (hs + 3 * k), y0 - hs - 8 * k, hs, lleno);
+        }
+    }
+    if (g_survival && glfwGetTime() - g_danoFlash < 0.4) hRect(0, 0, (float)fbw, (float)fbh, 0.85f, 0.0f, 0.0f, 0.35f * (float)(1.0 - (glfwGetTime() - g_danoFlash) / 0.4));
     if (!g_menu && !(g_veh.activo && g_veh.pilotando)) {
         char nm[64];
-        if (g_destruir) std::snprintf(nm, sizeof nm, "DESTRUIR");
+        if (g_material < 0) std::snprintf(nm, sizeof nm, "MANO VACIA");
+        else if (g_destruir) std::snprintf(nm, sizeof nm, "DESTRUIR");
         else if (g_material == ID_SPRAY) std::snprintf(nm, sizeof nm, "SPRAY %s (Z/C COLOR) CLIC DER PINTA", NOMBRE_COLOR[g_sprayColor]);
         else if (g_material == RUEDA) std::snprintf(nm, sizeof nm, "PONER: RUEDA DIAMETRO %d (Z/C TAMANO)", g_ruedaD);
         else std::snprintf(nm, sizeof nm, "PONER: %s", nombreSlot(g_material));
-        hTexto(nm, (fbw - hAncho(nm, t + 1)) / 2.0f, y0 - 12 * k - 7 * (t + 1), t + 1, 1, 1, 1);
+        hTexto(nm, (fbw - hAncho(nm, t + 1)) / 2.0f, y0 - 12 * k - 7 * (t + 1) - (g_survival ? 26 * k : 0), t + 1, 1, 1, 1);
     }
     if (g_veh.activo && g_veh.pilotando) {   // instrumentos de la avioneta
         double vel = std::sqrt(g_veh.v.x * g_veh.v.x + g_veh.v.y * g_veh.v.y + g_veh.v.z * g_veh.v.z);
@@ -1766,25 +2295,71 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
     if (g_menu) {
         hRect(0, 0, (float)fbw, (float)fbh, 0, 0, 0, 0.62f);
         float tt = t + 3;
-        const char* ti = "MATERIALES";
+        const char* ti = !g_survival ? "MATERIALES" : (g_pagina == 0 ? "INVENTARIO" : "RECETAS");
         float xs, ys, ss;
         menuGeom(fbw, fbh, 0, xs, ys, ss);
         hTexto(ti, (fbw - hAncho(ti, tt)) / 2.0f, ys - 78 * k, tt, 1, 1, 1);
         char h1[96];
-        std::snprintf(h1, sizeof h1, "CLIC: PONER EN LA CASILLA %d    E / ESC: CERRAR", g_sel + 1);
-        hTexto(h1, (fbw - hAncho(h1, t)) / 2.0f, ys - 24 * k, t, 0.85f, 0.85f, 0.85f);
+        if (g_survival && g_pagina == 1) std::snprintf(h1, sizeof h1, "CLIC EN UNA RECETA PARA FABRICAR   TAB: OBJETOS   E: CERRAR");
+        else std::snprintf(h1, sizeof h1, "ARRASTRA A LA BARRA   CLIC DER: VACIAR   E: CERRAR%s", g_survival ? "   TAB: RECETAS" : "");
+        float th = t;
+        while (th > 1 && hAncho(h1, th) > fbw - 24 * k) th -= 1;
+        hTexto(h1, (fbw - hAncho(h1, th)) / 2.0f, ys - 24 * k, th, 0.9f, 0.9f, 0.6f);
         int hov = menuTileEn(g_mx, g_my);
-        for (int i = 0; i < NTIPOS_MENU; i++) {
+        if (g_survival) {
+            double qx = g_mx * fbw / std::max(1, g_winW), qy = g_my * fbh / std::max(1, g_winH);
+            hBoton(tabRect(fbw, fbh, 0), k, g_pagina == 0 ? 0.20f : 0.10f, g_pagina == 0 ? 0.45f : 0.20f, g_pagina == 0 ? 0.25f : 0.14f, mDentro(tabRect(fbw, fbh, 0), qx, qy), "OBJETOS", t);
+            hBoton(tabRect(fbw, fbh, 1), k, g_pagina == 1 ? 0.20f : 0.10f, g_pagina == 1 ? 0.45f : 0.20f, g_pagina == 1 ? 0.25f : 0.14f, mDentro(tabRect(fbw, fbh, 1), qx, qy), "RECETAS", t);
+            if (g_pagina == 1) {
+                const auto& R = recetas();
+                for (int ri = 0; ri < (int)R.size(); ri++) {
+                    MRect rr = recRect(fbw, fbh, ri);
+                    bool ok = puedeCraftear(R[ri]), hv = mDentro(rr, qx, qy);
+                    hRect(rr.x, rr.y, rr.w, rr.h, ok ? 0.10f : 0.08f, ok ? 0.28f : 0.08f, ok ? 0.12f : 0.08f, 0.92f);
+                    hMarco(rr.x, rr.y, rr.w, rr.h, std::max(2.0f, 2 * k), hv ? 1.0f : 0.3f, hv ? 0.85f : 0.3f, hv ? 0.2f : 0.3f);
+                    hIcono(R[ri].out, rr.x + 4 * k, rr.y + 4 * k, rr.h - 8 * k);
+                    char l1[64]; std::snprintf(l1, sizeof l1, "%s%s", R[ri].n > 1 ? "" : "", nombreSlot(R[ri].out));
+                    if (R[ri].n > 1) std::snprintf(l1, sizeof l1, "%s X%d", nombreSlot(R[ri].out), R[ri].n);
+                    char l2[96];
+                    if (R[ri].nb) std::snprintf(l2, sizeof l2, "%d %s + %d %s", R[ri].na, nombreSlot(R[ri].a), R[ri].nb, nombreSlot(R[ri].b));
+                    else std::snprintf(l2, sizeof l2, "%d %s", R[ri].na, nombreSlot(R[ri].a));
+                    float p1 = std::max(2.0f, t - 1), p2 = std::max(1.0f, t - 1);
+                    hTexto(l1, rr.x + rr.h + 4 * k, rr.y + 4 * k, p1, 1, 1, 1);
+                    hTexto(l2, rr.x + rr.h + 4 * k, rr.y + 4 * k + 9 * p1, p2, ok ? 0.6f : 0.9f, ok ? 1.0f : 0.5f, ok ? 0.6f : 0.5f);
+                }
+            }
+        }
+        for (int i = 0; i < (g_survival && g_pagina == 1 ? 0 : (int)g_menuItems.size()); i++) {
             float sx, sy, sz;
             menuGeom(fbw, fbh, i, sx, sy, sz);
             hRect(sx - 6 * k, sy - 6 * k, sz + 12 * k, sz + 12 * k, 0.1f, 0.1f, 0.1f, 0.9f);
-            const int ti2 = menuTipo(i);
+            const int ti2 = g_menuItems[i];
             hIcono(ti2, sx, sy, sz);
+            hCantidad(ti2, sx, sy, sz, k, t);
             if (ti2 == hov) hMarco(sx - 6 * k, sy - 6 * k, sz + 12 * k, sz + 12 * k, std::max(3.0f, 4 * k), 1.0f, 0.85f, 0.2f);
             else if (ti2 == g_barra[g_sel]) hMarco(sx - 6 * k, sy - 6 * k, sz + 12 * k, sz + 12 * k, std::max(2.0f, 3 * k), 1, 1, 1);
             float np = t;
             while (np > 1 && hAncho(nombreSlot(ti2), np) > sz + 24 * k) np -= 1;
             hTexto(nombreSlot(ti2), sx + (sz - hAncho(nombreSlot(ti2), np)) / 2.0f, sy + sz + 10 * k, np, 1, 1, 1);
+        }
+        {   // la barra otra vez, encima del oscurecido, para arrastrar objetos a ella
+            int hj = barraEn(g_mx, g_my);
+            for (int i = 0; i < 9; i++) {
+                float bx, by, bs;
+                barraGeom(fbw, fbh, i, bx, by, bs);
+                hRect(bx, by, bs, bs, 0.05f, 0.05f, 0.05f, 0.95f);
+                if (g_barra[i] >= 0) { hIcono(g_barra[i], bx + 5 * k, by + 5 * k, bs - 10 * k); hCantidad(g_barra[i], bx + 5 * k, by + 5 * k, bs - 10 * k, k, t); }
+                if (i == g_sel) hMarco(bx - 2 * k, by - 2 * k, bs + 4 * k, bs + 4 * k, std::max(2.0f, 3 * k), 1, 1, 1);
+                else hMarco(bx, by, bs, bs, std::max(1.0f, k), 0.45f, 0.45f, 0.45f);
+                if (i == hj && g_mano != -100) hMarco(bx - 3 * k, by - 3 * k, bs + 6 * k, bs + 6 * k, std::max(3.0f, 4 * k), 1.0f, 0.85f, 0.2f);
+                char nb[4]; std::snprintf(nb, sizeof nb, "%d", i + 1);
+                hTexto(nb, bx + 4 * k, by + 3 * k, std::max(2.0f, t - 1), 1, 1, 1);
+            }
+        }
+        if (g_mano != -100) {   // el objeto agarrado sigue al cursor
+            float cs = 48.0f * k;
+            float cx = (float)(g_mx * fbw / std::max(1, g_winW)), cy = (float)(g_my * fbh / std::max(1, g_winH));
+            hIcono(g_mano, cx - cs / 2, cy - cs / 2, cs);
         }
     } else {
         // mira
@@ -1864,7 +2439,7 @@ static void pausaDibujar(int fbw, int fbh) {
     hRect(0, 0, (float)fbw, (float)fbh, 0, 0, 0, 0.58f);
     const char* ti = "PAUSA";
     float tp = std::max(4.0f, std::floor(6.0f * k));
-    hTexto(ti, (fbw - hAncho(ti, tp)) / 2.0f, fbh * 0.30f - 11 * tp, tp, 1.0f, 0.88f, 0.35f);
+    hTexto(ti, (fbw - hAncho(ti, tp)) / 2.0f, fbh * 0.28f - 9 * tp, tp, 1.0f, 0.88f, 0.35f);
     int hov = pausaHit(g_mx, g_my);
     hBoton(pausaRect(fbw, fbh, 0), k, 0.16f, 0.50f, 0.22f, hov == 0, "CONTINUAR", t * 1.5f);
     hBoton(pausaRect(fbw, fbh, 1), k, g_lodOn ? 0.16f : 0.45f, g_lodOn ? 0.36f : 0.20f, g_lodOn ? 0.60f : 0.20f, hov == 1,
@@ -1873,12 +2448,34 @@ static void pausaDibujar(int fbw, int fbh) {
            g_anclaOn ? "CAMBIOS LEJANOS: ON" : "CAMBIOS LEJANOS: OFF", t * 1.25f);
     hBoton(pausaRect(fbw, fbh, 3), k, g_graf ? 0.16f : 0.45f, g_graf ? 0.36f : 0.20f, g_graf ? 0.60f : 0.20f, hov == 3,
            g_graf ? "GRAFICOS: ON" : "GRAFICOS: OFF", t * 1.25f);
-    hBoton(pausaRect(fbw, fbh, 4), k, 0.45f, 0.14f, 0.14f, hov == 4, "GUARDAR Y SALIR", t * 1.5f);
+    hBoton(pausaRect(fbw, fbh, 4), k, 0.45f, 0.32f, 0.10f, hov == 4, g_survival ? "MODO: SURVIVAL" : "MODO: CREATIVO", t * 1.25f);
+    {
+        static const char* NP[3] = {"RENDIMIENTO: NORMAL", "RENDIMIENTO: ALTO", "RENDIMIENTO: MAXIMO"};
+        hBoton(pausaRect(fbw, fbh, 5), k, 0.30f + 0.20f * g_perf, 0.22f, 0.45f - 0.10f * g_perf, hov == 5, NP[g_perf], t * 1.25f);
+    }
+    hBoton(pausaRect(fbw, fbh, 6), k, g_conservar ? 0.16f : 0.45f, g_conservar ? 0.36f : 0.20f, g_conservar ? 0.60f : 0.20f, hov == 6,
+           g_conservar ? "CONSERVAR CHUNKS: SI" : "CONSERVAR CHUNKS: NO", t * 1.25f);
+    hBoton(pausaRect(fbw, fbh, 7), k, 0.45f, 0.14f, 0.14f, hov == 7, "GUARDAR Y SALIR", t * 1.5f);
     const char* ay = "ESC: CONTINUAR";
-    hTexto(ay, (fbw - hAncho(ay, t)) / 2.0f, pausaRect(fbw, fbh, 5).y, t, 0.8f, 0.8f, 0.85f);
+    hTexto(ay, (fbw - hAncho(ay, t)) / 2.0f, pausaRect(fbw, fbh, 8).y, t, 0.8f, 0.8f, 0.85f);
 }
 
 // ---------------------------------------------------------------- principal
+static bool g_argHost = false;
+static std::string g_argUnir, g_argNombre;
+static int g_argPuerto = RED_PUERTO;
+static void leerArgs(int argc, char** argv) {   // --hospedar [puerto]   --unir IP[:puerto]   --nombre X
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--hospedar") { g_argHost = true; if (i + 1 < argc && argv[i + 1][0] != '-') g_argPuerto = std::atoi(argv[++i]); }
+        else if (a == "--unir" && i + 1 < argc) g_argUnir = argv[++i];
+        else if (a == "--nombre" && i + 1 < argc) g_argNombre = argv[++i];
+    }
+    if (const char* e = std::getenv("RED_UNIR")) g_argUnir = e;
+    if (std::getenv("RED_HOST")) g_argHost = true;
+    if (const char* e = std::getenv("RED_NOMBRE")) g_argNombre = e;
+    if (const char* e = std::getenv("RED_PUERTO")) g_argPuerto = std::atoi(e);
+}
 static int juego_main() {
     if (!glfwInit()) { std::fprintf(stderr, "No se pudo iniciar GLFW\n"); return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -1896,10 +2493,28 @@ static int juego_main() {
     glfwSetCursorPosCallback(ventana, alMouse);
     glfwSetScrollCallback(ventana, alRueda);
     glfwSetKeyCallback(ventana, alTecla);
+    glfwSetCharCallback(ventana, alChar);
     glfwSetMouseButtonCallback(ventana, alClic);
     migrarMundoViejo();
     cargarOpciones();
-    if (const char* em = std::getenv("MUNDO")) {      // (pruebas) saltar el menu: MUNDO=<carpeta> [SEMILLA=n]
+    bool redSpawn = false;
+    if (!g_argNombre.empty()) g_red.miNombre = g_argNombre;
+    if (!g_argUnir.empty()) {       // unirse a la partida de otro jugador: se baja su mundo y se salta el menu
+        std::string ip = g_argUnir; int puerto = RED_PUERTO;
+        size_t dp = ip.rfind(':');
+        if (dp != std::string::npos) { puerto = std::atoi(ip.c_str() + dp + 1); ip = ip.substr(0, dp); }
+        std::string safe = ip; for (char& ch : safe) if (!std::isalnum((unsigned char)ch)) ch = '_';
+        std::printf("RED: conectando a %s:%d ...\n", ip.c_str(), puerto);
+        std::fflush(stdout);
+        g_dir = std::string(RAIZ_MUNDOS) + "/red_" + safe;
+        if (!g_red.unirse(ip, puerto, g_dir)) {
+            std::printf("RED: %s\n", g_red.error.c_str());
+            glfwTerminate();
+            return 1;
+        }
+        g_semilla = g_red.semilla; g_nombreMundo = "red " + ip; redSpawn = true;
+        g_pantalla = 1;
+    } else if (const char* em = std::getenv("MUNDO")) {      // (pruebas) saltar el menu: MUNDO=<carpeta> [SEMILLA=n]
         g_dir = std::string(RAIZ_MUNDOS) + "/" + em;
         std::error_code ec0;
         std::filesystem::create_directories(g_dir, ec0);
@@ -2005,8 +2620,18 @@ static int juego_main() {
 #ifdef MOVIL
     hilos = std::min(hilos, 3);          // celular: deja libres los nucleos grandes para dibujar y no calientes de mas
 #endif
-    g_hilos = hilos;
-    g_pool.iniciar(hilos);
+    g_hilosBase = hilos;
+    {   // se crean mas hilos de los normales; el perfil de rendimiento decide cuantos trabajan
+        int hm = (int)std::thread::hardware_concurrency() - 1;
+#ifdef MOVIL
+        hm = std::min(hm, 5);
+#else
+        hm = std::min(hm, 16);
+#endif
+        g_hilosMax = std::max(hilos, hm);
+    }
+    g_pool.iniciar(g_hilosMax);
+    aplicarPerf();
 
     // lista de posiciones de chunk ordenadas de cerca a lejos
     struct Off { int dx, dz; int d2; };
@@ -2032,8 +2657,26 @@ static int juego_main() {
         g_j.p = {sx, alturaTerreno(sx, sz) + 4.0, sz};
     }
     bool jugadorCargado = cargarJugador();
-    vehCargar();
+    if (redSpawn && g_red.hayAnfitrionPos) { g_j.p = {g_red.spawn[0] + 1.5, g_red.spawn[1] + 0.5, g_red.spawn[2]}; g_j.v = {0, 0, 0}; g_j.volar = false; }
+    else vehCargar();
+    if (const char* ey = std::getenv("RED_YAW")) g_j.yaw = std::atof(ey);   // (pruebas)
+    g_red.dirMundo = g_dir; g_red.semilla = g_semilla;
+    g_red.aplicar = redRecibirEdits;
+    redIniciarCallbacks();
+    g_red.guardarYa = [] { guardarTodosLosSucios(); };
+    if (g_argHost && g_argUnir.empty()) {
+        if (g_red.hospedar(g_argPuerto)) std::printf("RED: hospedando en %s:%d  (tus amigos usan: --unir %s)\n", rs_ip_local(), g_argPuerto, rs_ip_local());
+        else std::printf("RED: %s\n", g_red.error.c_str());
+    }
     if (const char* eh = std::getenv("HORA")) g_hora = std::atof(eh);   // (pruebas)
+    if (const char* te = std::getenv("TELE")) {   // (pruebas) TELE=x,z[,yaw[,alto]]: aparecer en esas coordenadas
+        double tx = 0, tz = 0, ty = 0, ta = 5.0; std::sscanf(te, "%lf,%lf,%lf,%lf", &tx, &tz, &ty, &ta);
+        g_j.p = {tx, alturaTerreno(tx, tz) + ta, tz}; g_j.yaw = ty; g_j.pitch = -0.15; g_j.v = {0, 0, 0};
+    }
+    if (const char* sv = std::getenv("SURVIVAL")) {   // (pruebas) survival con materiales
+        g_survival = true; g_spawnOk = true; g_spawnS[0] = g_j.p.x; g_spawnS[1] = g_j.p.y; g_spawnS[2] = g_j.p.z; g_j.volar = false;
+        if (std::atoi(sv) > 1) { g_vida = 13; g_inv[MADERA] = 60; g_inv[PIEDRA] = 30; g_inv[HIERRO] = 25; g_inv[ARENA] = 8; g_inv[CARBON] = 3; g_inv[PASTO] = 12; g_inv[HERR_BASE] = 1; g_inv[HERR_BASE + 5] = 1; g_barra[1] = HERR_BASE; g_barra[2] = PASTO; g_barra[3] = MADERA; g_barra[4] = HERR_BASE + 5; g_barra[0] = VACIO; aplicarSel(); }
+    }
     if (const char* em = std::getenv("MATERIAL")) { g_barra[g_sel] = std::atoi(em); aplicarSel(); }   // (pruebas)
     std::printf("Carpeta del mundo: %s%s\n", g_dir.c_str(), jugadorCargado ? " (mundo anterior cargado)" : " (mundo nuevo)");
     double tGuardado = glfwGetTime(), tMensaje = -10, tAgua = 0;
@@ -2066,37 +2709,100 @@ static int juego_main() {
                     int cx = pcx + o.dx, cz = pcz + o.dz;
                     ChunkP c = buscar(cx, cy, cz);
                     if (!c) {
-                        if (g_genPend.load() >= hilos * 6) continue;
+                        if (g_genPend.load() >= genMax()) continue;
                         c = std::make_shared<Chunk>(cx, cy, cz);
                         g_mapa[clave(cx, cy, cz)] = c;
                         pedirGenerar(c);
                     } else if (c->state.load(std::memory_order_acquire) == ST_READY && o.d2 <= RC * RC) {
                         if (!c->dat.d && c->dat.uni == AIRE) { c->state.store(ST_MESHED); continue; }   // aire: nada que dibujar
-                        if (g_meshPend.load() < hilos * 4) pedirMalla(c, o.d2);
+                        if (g_meshPend.load() < mallaMax()) pedirMalla(c, o.d2);
                     }
                 }
             }
         }
         if (frame % 30 == 0) {
             anclarActualizar(g_j.p.x, g_j.p.z);
+            auto liberar = [&](const ChunkP& ch) {
+                ch->viva.store(false);
+                if (ch->sucioDisco.load() && ch->state.load() >= ST_READY) guardarChunk(*ch);
+                std::lock_guard<std::mutex> lk(ch->mtx);
+                ch->gOp.liberar();
+                ch->gAg.liberar();
+                ch->gLuz.liberar();
+            };
+            auto protegido = [&](const Chunk& ch) { return g_requeridos.count(colKey(ch.cx, ch.cz)) || g_redCols.count(colKey(ch.cx, ch.cz)); };
             for (auto it = g_mapa.begin(); it != g_mapa.end();) {
                 int dx = it->second->cx - pcx, dz = it->second->cz - pcz;
-                if (dx * dx + dz * dz > (RC + 3) * (RC + 3) && !g_requeridos.count(colKey(it->second->cx, it->second->cz))) {
-                    it->second->viva.store(false);
-                    if (it->second->sucioDisco.load() && it->second->state.load() >= ST_READY) guardarChunk(*it->second);
-                    std::lock_guard<std::mutex> lk(it->second->mtx);
-                    it->second->gOp.liberar();
-                    it->second->gAg.liberar();
-                    it->second->gLuz.liberar();
+                // con "conservar chunks" no se descartan por distancia (solo si se llena el limite de RAM, mas abajo)
+                if (!g_conservar && dx * dx + dz * dz > (RC + 3) * (RC + 3) && !protegido(*it->second)) {
+                    liberar(it->second);
                     it = g_mapa.erase(it);
                 } else ++it;
             }
+            if (g_conservar) {   // limite de RAM: unos 8000 chunks con datos (~250 MB); se descartan primero los mas lejanos
+                const size_t TOPE = 8000;
+                size_t conDatos = 0;
+                for (auto& kv : g_mapa) if (kv.second->dat.d) conDatos++;
+                if (conDatos > TOPE) {
+                    std::vector<std::pair<int, int64_t>> lej;
+                    for (auto& kv : g_mapa) {
+                        const Chunk& ch = *kv.second;
+                        int dx = ch.cx - pcx, dz = ch.cz - pcz, d2 = dx * dx + dz * dz;
+                        if (ch.dat.d && d2 > (RC + 3) * (RC + 3) && !protegido(ch)) lej.push_back({d2, kv.first});
+                    }
+                    std::sort(lej.begin(), lej.end(), [](const std::pair<int, int64_t>& a, const std::pair<int, int64_t>& b) { return a.first > b.first; });
+                    size_t quitar = conDatos - TOPE * 9 / 10;
+                    for (size_t i = 0; i < lej.size() && i < quitar; i++) {
+                        auto it = g_mapa.find(lej[i].second);
+                        if (it == g_mapa.end()) continue;
+                        liberar(it->second);
+                        g_mapa.erase(it);
+                    }
+                }
+            }
         }
-#ifdef MOVIL
-        recogerMallas(4);                // celular: pocas mallas nuevas por cuadro (evita tirones)
-#else
-        recogerMallas(12);
-#endif
+        if (g_red.activo()) {
+            static V3 pPrev = g_j.p; static double velS = 0;
+            double vh = std::sqrt((g_j.p.x - pPrev.x) * (g_j.p.x - pPrev.x) + (g_j.p.z - pPrev.z) * (g_j.p.z - pPrev.z)) / std::max(dt, 1e-3);
+            if (vh > 40) vh = 0;
+            velS += (vh - velS) * std::min(1.0, dt * 8.0); pPrev = g_j.p;
+            bool sent = (g_veh.activo && g_veh.pilotando);
+            g_red.yo = {(float)g_j.p.x, (float)g_j.p.y, (float)g_j.p.z, (float)g_j.yaw, (float)g_j.pitch, (float)velS, (uint8_t)((g_j.volar ? 1 : 0) | (sent ? 2 : 0) | (g_golpea ? 4 : 0)), objetoEnMano()};
+            g_red.horaLocal = (float)g_hora;
+            g_red.paso(ahora);
+            if (g_red.cli && g_red.horaRecibida >= 0) g_hora = g_red.horaRecibida;
+            {   // avioneta compartida: la simula quien la pilota; si nadie, el anfitrion; los demas solo siguen su pose
+                static double tVeh = 0; static bool pilPrev = false;
+                bool pil = g_veh.activo && g_veh.pilotando;
+                g_vehCinematico = g_veh.activo && (g_red.cli || g_veh.pilotoRed >= 0);
+                if (g_veh.activo) {
+                    bool dueno = pil || !g_vehCinematico;
+                    if ((dueno && ahora - tVeh > 0.05) || (pilPrev && !pil)) { tVeh = ahora; vehEnviarPose(pil ? g_red.miId : 255); }
+                }
+                pilPrev = pil;
+            }
+            redPendientes();
+            jugActualizar(dt);
+            if (g_red.host && frame % 10 == 0) {
+                g_redCols.clear();
+                for (auto& kv : g_red.rem) if (kv.second.visto) {
+                    int rcx = divPiso((int)std::floor(kv.second.x * SUB), CS), rcz = divPiso((int)std::floor(kv.second.z * SUB), CS);
+                    for (int dz = -3; dz <= 3; dz++) for (int dx = -3; dx <= 3; dx++) {
+                        g_redCols.insert(colKey(rcx + dx, rcz + dz));
+                        for (int cy = 0; cy < HYC; cy++) if (!buscar(rcx + dx, cy, rcz + dz) && g_genPend.load() < genMax()) {
+                            ChunkP c = std::make_shared<Chunk>(rcx + dx, cy, rcz + dz);
+                            g_mapa[clave(rcx + dx, cy, rcz + dz)] = c;
+                            pedirGenerar(c);
+                        }
+                    }
+                }
+            }
+            char ib[160];
+            if (g_red.host) std::snprintf(ib, sizeof ib, "RED: ANFITRION %s:%d - %d JUGADORES", rs_ip_local(), g_argPuerto, (int)g_red.rem.size() + 1);
+            else std::snprintf(ib, sizeof ib, "RED: CONECTADO - %d JUGADORES", (int)g_red.rem.size() + 1);
+            g_redInfo = ib;
+        } else { g_vehCinematico = false; if (!g_red.error.empty()) g_redInfo = g_red.error; }
+        recogerMallas(subidasMax());     // (celular: pocas mallas por cuadro para evitar tirones)
 
         // ---- guardado (automatico cada 30 s, con F5, y al salir)
         if (g_guardarYa || ahora - tGuardado > 30.0) {
@@ -2108,6 +2814,7 @@ static int juego_main() {
         }
 
         // ---- fisica
+        if (g_survival) g_j.volar = false;
         bool conocido = true;
         leerCubito((int)std::floor(g_j.p.x * SUB), (int)std::floor((g_j.p.y - 0.2) * SUB), (int)std::floor(g_j.p.z * SUB), &conocido);
         if (cargando && conocido) cargando = false;
@@ -2163,12 +2870,27 @@ static int juego_main() {
                     V3 f_, r_, u_; vehBase(g_veh, f_, r_, u_);
                     sobre = u_.y > 0.64 && !chocaMundo(g_j.p.x, g_j.p.y - 0.08, g_j.p.z) && chocaVeh(g_j.p.x, g_j.p.y - 0.08, g_j.p.z);
                 }
+                if (g_survival) {                              // dano por caida
+                    if (g_j.suelo || enAgua) {
+                        if (g_j.suelo && !enAgua && glfwGetTime() > g_protT && g_caidaMax - g_j.p.y > 3.0) survDano((float)(g_caidaMax - g_j.p.y - 3.0));
+                        g_caidaMax = g_j.p.y;
+                    } else g_caidaMax = std::max(g_caidaMax, g_j.p.y);
+                }
                 if (sobre) vehEntrar();                       // pisaste el vehiculo: pasas a caminar en su sistema de referencia
                 else if (g_j.suelo) g_j.inercia = {0, 0, 0};
                 else g_j.inercia = g_j.inercia * std::exp(-0.6 * dt);
             }
         }
 
+        if (g_survival && !cargando) {                 // vida: se regenera sola y al morir reapareces
+            if (pil || g_sobreVeh) g_caidaMax = g_j.p.y;
+            if (g_vida > 0 && g_vida < 20.0f) { g_vidaT += dt; if (g_vidaT > 4.0) { g_vida = std::min(20.0f, g_vida + 1.0f); g_vidaT = 0; } } else g_vidaT = 0;
+            if (g_vida <= 0) {
+                g_j.p = {g_spawnS[0], g_spawnS[1] + 0.5, g_spawnS[2]}; g_j.v = {0, 0, 0}; g_j.inercia = {0, 0, 0};
+                g_vida = 20.0f; g_caidaMax = g_j.p.y; g_vidaT = 0; g_protT = glfwGetTime() + 3.0;
+                g_aviso = "MORISTE: REAPARECES EN TU PUNTO"; g_avisoT = glfwGetTime();
+            }
+        }
         // ---- camara
         V3 mira = {std::cos(g_j.pitch) * std::sin(g_j.yaw), std::sin(g_j.pitch), -std::cos(g_j.pitch) * std::cos(g_j.yaw)};
         V3 cam = {g_j.p.x, g_j.p.y + g_j.ojo, g_j.p.z};
@@ -2187,22 +2909,30 @@ static int juego_main() {
         // ---- romper / poner
         Golpe golpe;
         if (!cargando && !pil) golpe = lanzarRayo(cam, norm(mira), 8.0);
-        bool izq = !pil && g_capturado && glfwGetMouseButton(ventana, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-        bool der = !pil && g_capturado && glfwGetMouseButton(ventana, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+        bool izq = !pil && !g_chat && g_capturado && glfwGetMouseButton(ventana, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+        bool der = !pil && !g_chat && g_capturado && glfwGetMouseButton(ventana, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+        g_golpea = izq || der;
+        g_redEnviar = true;
         if (g_pedirG) { g_pedirG = false; if (pil) vehSubirBajar(); else if (g_veh.activo) vehSubirBajar(); else if (golpe.hay) vehEnsamblar(golpe.x, golpe.y, golpe.z); else aviso("MIRA UNA PIEZA DEL VEHICULO Y PULSA G"); if (g_veh.activo) g_guardarYa = true; }
         if (g_pedirH) { g_pedirH = false; if (g_veh.activo && !g_veh.pilotando) { vehDesarmar(); g_guardarYa = true; } }
-        if (golpe.hay && (izq || der) && ahora - tAccion > 0.18) {
+        double cdAcc = 0.18;
+        if (g_survival && izq && golpe.hay) cdAcc = survCooldown(leerCubito(golpe.x, golpe.y, golpe.z), g_material);
+        if (golpe.hay && (izq || der) && !(der && !izq && (g_material < 0 || esHerr(g_material))) && ahora - tAccion > cdAcc) {
             tAccion = ahora;
             std::vector<ChunkP> sucios;
             auto celda = [&](int x, int y, int z, int& x0, int& y0, int& z0, int& n) {
                 if (g_pincelBloque) { x0 = divPiso(x, SUB) * SUB; y0 = divPiso(y, SUB) * SUB; z0 = divPiso(z, SUB) * SUB; n = SUB; }
                 else { x0 = x; y0 = y; z0 = z; n = 1; }
             };
-            if (izq || (der && g_destruir)) {
+            if (izq || (der && g_destruir && !g_survival)) {
                 int x0, y0, z0, n;
                 celda(golpe.x, golpe.y, golpe.z, x0, y0, z0, n);
                 for (int y = y0; y < y0 + n; y++) for (int z = z0; z < z0 + n; z++) for (int x = x0; x < x0 + n; x++)
-                    if (esRompible(leerCubito(x, y, z))) escribirCubito(x, y, z, AIRE, sucios);
+                    { uint8_t tp = leerCubito(x, y, z);
+                      if (esRompible(tp)) {
+                          if (g_survival && survPicoOK(tp, g_material)) { int d = survDrop(tp); if (d >= 0) g_inv[d] = std::min(9999, g_inv[d] + 1); }
+                          escribirCubito(x, y, z, AIRE, sucios);
+                      } }
             } else if (g_material == ID_SPRAY) {      // pintar la carroceria
                 int x0, y0, z0, n;
                 celda(golpe.x, golpe.y, golpe.z, x0, y0, z0, n);
@@ -2221,9 +2951,12 @@ static int juego_main() {
                         int x = golpe.px + (ejeX ? e : a - c0), y = golpe.py + b2 - c0, z = golpe.pz + (ejeX ? a - c0 : e);
                         uint8_t actual = leerCubito(x, y, z);
                         if (actual != AIRE && !esAgua(actual)) continue;
+                        if (g_survival) { if (g_inv[RUEDA] <= 0) continue; g_inv[RUEDA]--; }
                         escribirCubito(x, y, z, RUEDA, sucios);
                     }
                 }
+            } else if (esHerr(g_material) || g_material < 0) {
+                // las herramientas y la mano vacia no ponen nada
             } else {
                 int x0, y0, z0, n;
                 celda(golpe.px, golpe.py, golpe.pz, x0, y0, z0, n);
@@ -2238,9 +2971,11 @@ static int juego_main() {
                         by0 < g_j.p.y + g_j.alto && by0 + VS > g_j.p.y &&
                         bz0 < g_j.p.z + g_j.mitad && bz0 + VS > g_j.p.z - g_j.mitad;
                     if (dentro) continue;
+                    if (g_survival) { if (g_inv[g_material] <= 0) continue; g_inv[g_material]--; }
                     escribirCubito(x, y, z, (uint8_t)g_material, sucios);
                 }
             }
+            auto tR0 = std::chrono::steady_clock::now();
             for (auto& c : sucios) remallarYa(c);
             if (!sucios.empty()) {
                 int ex0 = golpe.x, ex1 = golpe.x, ey0 = golpe.y, ey1 = golpe.y, ez0 = golpe.z, ez1 = golpe.z;
@@ -2251,8 +2986,19 @@ static int juego_main() {
                 }
                 marcarLuzSucia(ex0, ex1, ey0, ey1, ez0, ez1, sucios);
             }
+            if (std::getenv("DBGROMPER") && !sucios.empty()) std::printf("ROMPER frame %d: %zu chunks sync, %.2f ms hilo principal, luz marcados %d\n", frame, sucios.size(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tR0).count(), g_marcadosN);
         }
+        g_redEnviar = false;
 
+        if (std::getenv("FAKE") && !g_red.activo() && frame > 5) { auto it9 = g_red.rem.find(9); if (it9 != g_red.rem.end()) { it9->second.y = (float)g_j.p.y; it9->second.sy = (float)g_j.p.y; } jugActualizar(dt); }
+        if (const char* fk = std::getenv("FAKE")) if (frame == 5) {   // (pruebas) un jugador falso a 3 bloques de frente: FAKE=<objeto>,<flags>
+            int ob = 255, fl = 0; std::sscanf(fk, "%d,%d", &ob, &fl);
+            Remoto& r = g_red.rem[9]; r.id = 9; r.nombre = "FALSO";
+            r.x = (float)(g_j.p.x + std::sin(g_j.yaw) * 3.0); r.z = (float)(g_j.p.z - std::cos(g_j.yaw) * 3.0); r.y = (float)g_j.p.y;
+            r.yaw = (float)(g_j.yaw + 3.14159265 - 0.5); r.pitch = 0.2f; r.flags = (uint8_t)fl; r.held = (uint8_t)ob; r.vel = 0; r.sx = r.x; r.sy = r.y; r.sz = r.z; r.syaw = r.yaw; r.visto = true;
+        }
+        if (std::getenv("DBGINV") && frame % 5 == 0) std::printf("INV cm=%.1f vy=%.1f suelo=%d dt=%.4f f=%d arena=%d tierra=%d pasto=%d piedra=%d pico_p=%d vida=%.1f y=%.1f\n", g_caidaMax, g_j.v.y, (int)g_j.suelo, dt, frame, g_inv[ARENA], g_inv[TIERRA], g_inv[PASTO], g_inv[PIEDRA], g_inv[HERR_BASE + 1], g_vida, g_j.p.y);
+        if (const char* fc2 = std::getenv("CAIDA")) if (frame == std::atoi(fc2)) g_j.p.y += 14;   // (pruebas) soltarte desde 14 bloques
         if (std::getenv("PRUEBA_FOSO2") && frame == 250) {   // (pruebas) pozo y tunel excavados dentro del terreno, con una antorcha
             std::vector<ChunkP> su;
             int bx = (int)std::floor(g_j.p.x * SUB) + 20, bz = (int)std::floor(g_j.p.z * SUB);
@@ -2261,6 +3007,22 @@ static int juego_main() {
             for (int dx = 12; dx < 60; dx++) for (int dy = -30; dy < -20; dy++) for (int dz = 3; dz < 8; dz++) escribirCubito(bx + dx, gy + dy, bz + dz, AIRE, su);
             escribirCubito(bx + 5, gy - 29, bz + 5, ANTORCHA, su);
             std::printf("PRUEBA_FOSO2 en bloques x=%.1f z=%.1f\n", bx / (double)SUB, bz / (double)SUB);
+            for (auto& c : su) remallarYa(c);
+        }
+        if (const char* fc = std::getenv("PRUEBA_CHAT")) if (frame == std::atoi(fc) && g_red.activo()) g_red.chatEnviar("HOLA DESDE " + g_red.miNombre);   // (pruebas)
+        if (std::getenv("PRUEBA_RED_CHK") && frame % 250 == 0 && frame >= 250 && g_red.activo()) {   // (pruebas) lee las celdas de las dos torres
+            double hx = g_red.host ? g_j.p.x : g_red.spawn[0], hz = g_red.host ? g_j.p.z : g_red.spawn[2];
+            int bxh = (int)std::floor(hx * SUB) + 12, bzh = (int)std::floor(hz * SUB) - 30, bxc = (int)std::floor((hx + 1.5) * SUB) + 12, bzc = (int)std::floor(hz * SUB) + 30;
+            int gyh = (int)std::floor(alturaTerreno(bxh / (double)SUB, bzh / (double)SUB) * SUB), gyc = (int)std::floor(alturaTerreno(bxc / (double)SUB, bzc / (double)SUB) * SUB);
+            std::printf("CHK frame %d  torreAnfitrion=%d torreCliente=%d  remotos=%d\n", frame, (int)leerCubito(bxh + 3, gyh + 3, bzh + 3), (int)leerCubito(bxc + 3, gyc + 3, bzc + 3), (int)g_red.rem.size());
+        }
+        if (const char* ft = std::getenv("PRUEBA_RED_TORRE")) if (frame == std::atoi(ft)) {   // (pruebas) torre pequena que SE ENVIA por la red
+            std::vector<ChunkP> su;
+            int bx = (int)std::floor(g_j.p.x * SUB) + 12, bz = (int)std::floor(g_j.p.z * SUB) + (g_argUnir.empty() ? -30 : 30);
+            int gy = (int)std::floor(alturaTerreno(bx / (double)SUB, bz / (double)SUB) * SUB);
+            g_redEnviar = true;
+            for (int dy = 0; dy < 40; dy++) for (int dz = 0; dz < 16; dz++) for (int dx = 0; dx < 16; dx++) escribirCubito(bx + dx, gy + dy, bz + dz, (dy / 8) % 2 ? PIEDRA : MADERA, su);
+            g_redEnviar = false;
             for (auto& c : su) remallarYa(c);
         }
         if (std::getenv("PRUEBA_TORRE") && frame == 250) {   // (pruebas) torre de piedra de 10x10 bloques y 40 de alto
@@ -2321,12 +3083,16 @@ static int juego_main() {
         }
         if (std::getenv("PRUEBA_AVION") && std::getenv("PRUEBA_AVION")[0] != '2' && frame == 262) {    // ensamblar y subir
             vehEnsamblar(g_avionOrg[0], g_avionOrg[1], g_avionOrg[2]);
-            g_j.p = g_veh.p + V3{3.0, 0.5, 0}; g_pedirG = true;
+            g_j.p = g_veh.p + V3{3.0, 0.5, 0}; if (!std::getenv("PRUEBA_SINPILOTO")) g_pedirG = true;
             std::printf("AVION celdas=%d largo=%d enverg=%d sust=%.2f hel=%d asientos=%d timon=%d puntos=%d\n", (int)g_veh.celdas.size(), g_veh.largo, g_veh.enverg, g_veh.sust, g_veh.nHel, g_veh.nAsiento, g_veh.nTimon, (int)g_veh.pts.size());
         }
         if (std::getenv("PRUEBA_AVION_TECHO") && frame == 560) g_j.p.y += 6.0;      // (pruebas) saltar al techo del avion en pleno vuelo
         if (std::getenv("PRUEBA_AVION") && frame % 20 == 0 && g_veh.activo)
             std::printf("f=%d pos=%.1f %.1f %.1f v=%.1f %.1f %.1f pitch=%.2f gas=%.2f suelo=%d pil=%d | jug=%.1f %.1f %.1f sobre=%d\n", frame, g_veh.p.x, g_veh.p.y, g_veh.p.z, g_veh.v.x, g_veh.v.y, g_veh.v.z, g_veh.pitch, g_veh.gas, g_veh.suelo ? 1 : 0, g_veh.pilotando ? 1 : 0, g_j.p.x, g_j.p.y, g_j.p.z, g_sobreVeh ? 1 : 0);
+        if (const char* fg = std::getenv("PRUEBA_RED_G")) if (frame == std::atoi(fg) && g_veh.activo) { g_j.p = g_veh.p + V3{3.0, 0.5, 0}; g_pedirG = true; }   // (pruebas) subir a la avioneta
+        if (const char* fg = std::getenv("PRUEBA_RED_G2")) if (frame == std::atoi(fg) && g_veh.activo) g_pedirG = true;                                       // (pruebas) bajar
+        if (std::getenv("PRUEBA_RED_VEH") && frame % 100 == 0 && frame >= 200)   // (pruebas) estado de la avioneta compartida
+            std::printf("VEHRED frame %d activo=%d pil=%d pilotoRed=%d celdas=%d pos=%.1f %.1f %.1f gas=%.2f cinem=%d\n", frame, g_veh.activo ? 1 : 0, g_veh.pilotando ? 1 : 0, g_veh.pilotoRed, (int)g_veh.celdas.size(), g_veh.p.x, g_veh.p.y, g_veh.p.z, g_veh.gas, g_vehCinematico ? 1 : 0);
         if (std::getenv("PRUEBA_AGUA") && frame == 250) {   // (pruebas) plataforma con una fuente encima: debe repartirse y caer por los bordes
             std::vector<ChunkP> su;
             int bx = (int)std::floor(g_j.p.x * SUB) + 14, bz = (int)std::floor(g_j.p.z * SUB);
@@ -2532,6 +3298,39 @@ static int juego_main() {
         glUniform1f(uHDRm, gfx ? 1.0f : 0.0f);
         glUniform1f(uSomTx, 3.0f / pp.shRes);
 
+        // ---- oclusion: no se dibuja lo tapado por el relieve (detras de una montana) ni lo enterrado hondo bajo la superficie
+        static std::unordered_map<int64_t, float> s_colMin;      // altura minima del terreno en cada columna de chunks (se calcula una vez)
+        static uint32_t s_colSem = 0xFFFFFFFFu;
+        if (s_colSem != g_semilla) { s_colMin.clear(); s_colSem = g_semilla; }
+        static const bool oclOn = std::getenv("NOOCL") == nullptr;
+        auto minCol = [&](int cx_, int cz_) -> float {
+            int64_t k = colKey(cx_, cz_);
+            if (!g_editCols.empty() && g_editCols.count(k)) return -1e9f;       // columna editada: puede haber tuneles
+            auto it = s_colMin.find(k);
+            if (it != s_colMin.end()) return it->second;
+            float mh = 1e9f;
+            const double bx0 = (double)cx_ * CS / SUB, bz0 = (double)cz_ * CS / SUB, anc = (double)CS / SUB;
+            for (int a = 0; a <= 4; a++) for (int b = 0; b <= 4; b++) mh = std::min(mh, (float)alturaTerreno(bx0 + anc * a / 4.0, bz0 + anc * b / 4.0));
+            if (s_colMin.size() > 20000) s_colMin.clear();
+            s_colMin[k] = mh;
+            return mh;
+        };
+        const double tamB = CS * VS;                                 // lado del chunk en bloques
+        const bool camSobre = oclOn && cam.y > alturaTerreno(cam.x, cam.z) + 1.0;     // solo se oculta si estas sobre el suelo
+        auto rayoTapado = [&](double tx, double ty, double tz, int tcx, int tcz) -> bool {
+            double dx = tx - cam.x, dy = ty - cam.y, dz = tz - cam.z;
+            double dist = std::sqrt(dx * dx + dz * dz);
+            int n = (int)(dist / (tamB * 0.5)) + 1;
+            for (int i = 1; i < n; i++) {
+                double t = (double)i / n;
+                double px = cam.x + dx * t, pz = cam.z + dz * t, py = cam.y + dy * t;
+                int ccx = (int)std::floor(px / tamB), ccz = (int)std::floor(pz / tamB);
+                if ((ccx == tcx && ccz == tcz) || (ccx == pcx && ccz == pcz)) continue;
+                if (py < minCol(ccx, ccz) - 1.5f) return true;
+            }
+            return false;
+        };
+        int ocluidos = 0;
         std::vector<Chunk*> visibles;
         std::unordered_map<int64_t, bool> colOk;
         std::unordered_map<int64_t, double> colMinH;
@@ -2540,6 +3339,10 @@ static int juego_main() {
             Chunk* c = kv.second.get();
             if (c->state.load(std::memory_order_acquire) == ST_GEN) continue;     // se sigue dibujando la malla anterior mientras se rehace
             if (!c->gOp.n && !c->gAg.n) continue;
+            if (g_conservar) {      // chunks conservados fuera del radio: no se dibujan (de eso se encarga el mundo lejano)
+                int ex = c->cx - pcx, ez = c->cz - pcz;
+                if (ex * ex + ez * ez > (RC + 3) * (RC + 3) && !g_requeridos.count(colKey(c->cx, c->cz)) && !g_redCols.count(colKey(c->cx, c->cz))) continue;
+            }
             if (g_lodOn || SOLO_VISIBLE) {   // en el borde del mundo real (y en columnas lejanas) solo se dibuja la columna si esta completa: si no, se veria el subsuelo sobre el terreno lejano
                 int ddx = c->cx - pcx, ddz = c->cz - pcz;
                 if (ddx * ddx + ddz * ddz > (RC - 2) * (RC - 2)) {
@@ -2580,8 +3383,21 @@ static int juego_main() {
                 float pz = pl[k][2] > 0 ? (float)(mnz + tam) : (float)mnz;
                 if (pl[k][0] * px + pl[k][1] * py + pl[k][2] * pz + pl[k][3] < 0) fuera = true;
             }
-            if (!fuera) visibles.push_back(c);
+            if (fuera) continue;
+            if (camSobre) {
+                int ddx = c->cx - pcx, ddz = c->cz - pcz;
+                if (ddx * ddx + ddz * ddz >= 16) {
+                    const double top = (double)(c->cy + 1) * tamB;
+                    if (top < minCol(c->cx, c->cz) - 24.0f) continue;                      // enterrado hondo
+                    const double x0 = c->cx * tamB, z0 = c->cz * tamB;
+                    if (rayoTapado(x0 + tamB * 0.5, top + 1, z0 + tamB * 0.5, c->cx, c->cz) &&
+                        rayoTapado(x0 + 1, top + 1, z0 + 1, c->cx, c->cz) && rayoTapado(x0 + tamB - 1, top + 1, z0 + 1, c->cx, c->cz) &&
+                        rayoTapado(x0 + 1, top + 1, z0 + tamB - 1, c->cx, c->cz) && rayoTapado(x0 + tamB - 1, top + 1, z0 + tamB - 1, c->cx, c->cz)) { ocluidos++; continue; }
+                }
+            }
+            visibles.push_back(c);
         }
+        g_ocluidosN = ocluidos;
         triDib = 0; mallasDib = (int)visibles.size();
         // de cerca a lejos: el z-buffer descarta pronto lo tapado (menos pixeles pintados); el agua se pinta al reves (de lejos a cerca)
         std::sort(visibles.begin(), visibles.end(), [&](Chunk* a, Chunk* b) {
@@ -2606,6 +3422,15 @@ static int juego_main() {
         const float fogAv = (float)(g_lodOn ? LOD_FOG_MAX * 0.55 / 0.60 : VIEW_BLOCKS) * 0.60f, fogBv = (float)(g_lodOn ? LOD_FOG_MAX : VIEW_BLOCKS) * 0.97f;
         glDisable(GL_CULL_FACE);
         vehDibujar(vp, cam, solV, solF, skyMul, gfx ? 1.0f : 0.0f, cielo, fogAv, fogBv, false);
+        jugDibujar(vp, cam.x, cam.y, cam.z, solV, solF, skyMul, cielo, fogAv, fogBv);
+        g_etiquetas.clear();
+        for (auto& kv : g_red.rem) if (kv.second.visto) {       // nombres sobre la cabeza
+            const Remoto& m = kv.second;
+            float px = (float)(m.sx - cam.x), py = (float)(m.sy + 2.05 - cam.y), pz = (float)(m.sz - cam.z);
+            float cx_ = vp[0] * px + vp[4] * py + vp[8] * pz + vp[12], cy_ = vp[1] * px + vp[5] * py + vp[9] * pz + vp[13], cw = vp[3] * px + vp[7] * py + vp[11] * pz + vp[15];
+            if (cw < 0.1f || px * px + py * py + pz * pz > 80.0f * 80.0f) continue;
+            g_etiquetas.push_back({(cx_ / cw * 0.5f + 0.5f) * fbw, (1.0f - (cy_ / cw * 0.5f + 0.5f)) * fbh, m.nombre});
+        }
         glUseProgram(progMundo);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -2615,7 +3440,7 @@ static int juego_main() {
 
         // ---- nubes: cajas de 16 bloques a ~110 de altura; la malla se rehace al cruzar de celda, el viento solo la desplaza
         {
-            const double CN = 16.0, NUBE_Y = 110.0, NUBE_ALTO = 5.0;
+            const double CN = 16.0, NUBE_Y = 110.0 + OFFY, NUBE_ALTO = 5.0;
             const int RN = 20;
             double vx = ahora * 1.6, vz = ahora * 0.45;
             int cix = (int)std::floor((cam.x - vx) / CN), ciz = (int)std::floor((cam.z - vz) / CN);
@@ -2712,6 +3537,7 @@ static int juego_main() {
             float tY = std::tan(1.22f * 0.5f), tX = tY * (float)fbw / fbh;
             ppComponer(pp, vaoVacio, fbw, fbh, tX, tY, 0.05f, g_lodOn ? 1500.0f : 800.0f, true);
         }
+        if (!pil && !cargando && !g_menu) jugDibujarMano(vp, cam.x, cam.y, cam.z, g_j.yaw, g_j.pitch, objetoEnMano(), g_golpea, dt, solV, solF, skyMul, cielo);
         // ---- HUD (texto, barra de materiales, menu, mira)
         {
             g_hud.clear();
@@ -2727,13 +3553,14 @@ static int juego_main() {
             fps = (int)(fpsCuenta / (ahora - tFps));
             fpsCuenta = 0; tFps = ahora;
             char t[320];
-            std::snprintf(t, sizeof t, "Juego Voxel [%s] | %d FPS | %s | lejano %s %zu | chunks %zu (dibujados %d) | %dk triangulos | pos %.0f %.0f %.0f | pincel: %s | material: %s | %s",
-                          g_nombreMundo.c_str(), fps, cargando ? "CARGANDO..." : "listo", g_lodOn ? "ON" : "OFF", g_lod.size(), g_mapa.size(), mallasDib, triDib / 1000,
+            std::snprintf(t, sizeof t, "Juego Voxel [%s] | %d FPS | %s | lejano %s %zu | chunks %zu (dibujados %d, tapados %d) | %dk triangulos | pos %.0f %.0f %.0f | pincel: %s | material: %s | %s",
+                          g_nombreMundo.c_str(), fps, cargando ? "CARGANDO..." : "listo", g_lodOn ? "ON" : "OFF", g_lod.size(), g_mapa.size(), mallasDib, g_ocluidosN, triDib / 1000,
                           g_j.p.x, g_j.p.y, g_j.p.z, g_pincelBloque ? "BLOQUE" : "cubito", nombreSlot(g_material),
                           ahora - tMensaje < 3.0 ? "GUARDADO" : (g_j.volar ? "VOLANDO" : "caminando"));
             glfwSetWindowTitle(ventana, t);
         }
     }
+    g_red.cerrar();
     int nFin = guardarTodosLosSucios();
     guardarJugador();
     std::printf("Al salir: %d chunks guardados | cargados desde disco en esta sesion: %d\n", nFin, g_cargadosDisco.load());
@@ -2750,5 +3577,5 @@ void android_main(struct android_app* app) {       // punto de entrada en Androi
     ANativeActivity_finish(app->activity);
 }
 #else
-int main() { return juego_main(); }
+int main(int argc, char** argv) { leerArgs(argc, argv); return juego_main(); }
 #endif

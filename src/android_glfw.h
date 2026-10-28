@@ -28,7 +28,9 @@
 #define GLFW_CURSOR_DISABLED 8
 #define GLFW_RAW_MOUSE_MOTION 9
 #define GLFW_TRUE 1
+#define GLFW_RELEASE 0
 #define GLFW_PRESS 1
+#define GLFW_REPEAT 2
 #define GLFW_RELEASE 0
 #define GLFW_MOUSE_BUTTON_LEFT 0
 #define GLFW_MOUSE_BUTTON_RIGHT 1
@@ -42,6 +44,7 @@
 #define GLFW_KEY_F5 294
 #define GLFW_KEY_N 78
 #define GLFW_KEY_ENTER 257
+#define GLFW_KEY_BACKSPACE 259
 #define GLFW_KEY_KP_ENTER 335
 #define GLFW_KEY_B 66
 #define GLFW_KEY_V 86
@@ -213,6 +216,8 @@ static GLFWglproc glfwGetProcAddress(const char* nombre) {
 }
 static void glfwSetCursorPosCallback(GLFWwindow* w, FMouse f) { g_tac.alCursor = [f, w](double x, double y) { f(w, x, y); }; }
 static void glfwSetScrollCallback(GLFWwindow* w, FScroll f) { g_tac.alScroll = [f, w](double dy) { f(w, 0.0, dy); }; }
+typedef void (*FChar)(GLFWwindow*, unsigned int);
+static void glfwSetCharCallback(GLFWwindow*, FChar) {}
 static void glfwSetKeyCallback(GLFWwindow* w, FKey f) { g_tac.alTecla = [f, w](int k) { f(w, k, 0, GLFW_PRESS, 0); }; }
 static void glfwSetMouseButtonCallback(GLFWwindow* w, FBtn f) { g_tac.alBoton = [f, w](int b, int a) { f(w, b, a, 0); }; }
 static void glfwSetInputMode(GLFWwindow*, int, int) {}

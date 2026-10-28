@@ -17,9 +17,10 @@
 constexpr int    SUB = 2;                 // cubitos por lado de un bloque (1, 2, 4 u 8)
 constexpr int    CS = 32;                 // cubitos por lado de un chunk
 constexpr double VS = 1.0 / SUB;          // tamano de un cubito en bloques
-constexpr int    WORLD_H_BLOCKS = 96;     // altura del mundo en bloques
+constexpr int    OFFY = 105;              // bloques de profundidad bajo el relieve original (el terreno se sube OFFY bloques)
+constexpr int    WORLD_H_BLOCKS = 96 + OFFY;     // altura del mundo en bloques
 constexpr int    HYC = (WORLD_H_BLOCKS * SUB + CS - 1) / CS;   // chunks en vertical
-constexpr int    WATER_LEVEL = 22;        // nivel del agua (en bloques)
+constexpr int    WATER_LEVEL = 22 + OFFY;        // nivel del agua (en bloques)
 constexpr double LAGO_UMBRAL = 0.40;      // mas alto = mas lagunas
 constexpr double RIO_ANCHO = 0.060;       // mas alto = rios mas anchos
 #ifdef MOVIL
@@ -40,10 +41,11 @@ enum Tipo : uint8_t { AIRE = 0, PASTO, TIERRA, PIEDRA, ARENA, AGUA, MADERA, HOJA
                       LED_CELESTE, LED_AZUL, LED_VIOLETA, LED_MAGENTA, LED_ROSA, LED_BLANCO,
                       VIDRIO, CARROCERIA, ASIENTO, TIMON, ALA, RUEDA, HELICE, CONTROL,        // vidrio y piezas de vehiculo (v18)
                       CARR_0, CARR_1, CARR_2, CARR_3, CARR_4, CARR_5, CARR_6, CARR_7, CARR_8, CARR_9, CARR_10, CARR_11,   // carroceria pintada
+                      NIEVE, HIELO, CACTUS, HOJA_ROJA, HOJA_NARANJA, HOJA_AMARILLA, HOJA_ROSA, HOJA_PINO, PASTO_SECO,   // biomas v27
                       NTIPOS };
 constexpr int ID_SPRAY = 250;                        // herramienta (no es un bloque)
 static inline bool esPiezaVehiculo(uint8_t t) { return t >= CARROCERIA && t <= CARR_11; }
-static const int NTIPOS_MENU = ANTORCHA + 1 + 2 + 12 + 1 + 7 + 1;       // los que salen en el menu de materiales
+static const int NTIPOS_MENU = ANTORCHA + 1 + 2 + 12 + 1 + 7 + 1 + 9;       // los que salen en el menu de materiales
 static uint32_t g_semilla = 0;                      // semilla del mundo (0 = mundo clasico)
 static inline bool esMineral(uint8_t t) { return (t >= CARBON && t <= CUARZO) || (t >= ESTANO && t <= URANIO) || t == AZUFRE || t == SALITRE; }
 static inline bool esLed(uint8_t t) { return t >= LED_ROJO && t <= LED_BLANCO; }
@@ -58,8 +60,11 @@ static inline int menuTipo(int i) {   // casilla del menu -> tipo
     if (i < ANTORCHA + 15) return LED_ROJO + (i - (ANTORCHA + 3));
     if (i == ANTORCHA + 15) return VIDRIO;
     if (i < ANTORCHA + 23) return CARROCERIA + (i - (ANTORCHA + 16));
-    return ID_SPRAY;
+    if (i == ANTORCHA + 23) return ID_SPRAY;
+    return NIEVE + (i - (ANTORCHA + 24));
 }
+static inline bool esHoja(uint8_t t) { return t == HOJAS || (t >= HOJA_ROJA && t <= HOJA_PINO); }
+static inline bool esVeg(uint8_t t) { return t == MADERA || t == CACTUS || esHoja(t); }
 static inline bool esAgua(uint8_t t) { return t == AGUA || (t >= AGUA_F1 && t <= AGUA_F8); }
 static inline int nivelAgua(uint8_t t) { return t == AGUA ? 9 : (t >= AGUA_F1 && t <= AGUA_F8) ? t - AGUA_F1 + 1 : 0; }
 static inline bool esSolido(uint8_t t) { return t != AIRE && !esAgua(t) && t != ANTORCHA; }   // colisiona
@@ -112,42 +117,123 @@ static inline double suave(double a, double b, double x) {      // 0 si x<=a, 1 
     return t * t * (3 - 2 * t);
 }
 
-// cuanto desierto hay en ese punto (0 = nada, 1 = desierto completo)
-static double desierto(double bx, double bz) {
-    return suave(0.56, 0.64, fbm((float)bx * 0.0028f, (float)bz * 0.0028f, 3, 41));
+// ---------------------------------------------------------------- biomas
+// Dos campos de ruido muy suaves (temperatura y humedad, ~500 bloques) colocan cada punto en un plano; cada bioma tiene su "centro"
+// en ese plano y su peso baja con la distancia. Con los pesos se mezclan las formas del terreno (sin cortes bruscos).
+enum Bio { BIO_PRADERA = 0, BIO_BOSQUE, BIO_DENSO, BIO_DESIERTO, BIO_MESETA, BIO_PANTANO, BIO_TUNDRA, BIO_SABANA, BIO_OTONO, BIO_N };
+static inline float acota01(float v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+static int biomaPesos(double bx, double bz, float* w) {      // devuelve el bioma dominante
+    float T = fbm((float)bx * 0.0022f, (float)bz * 0.0022f, 2, 61);
+    float Hm = fbm((float)bx * 0.0026f + 500.0f, (float)bz * 0.0026f, 2, 71);
+    float t = acota01((T - 0.24f) / 0.52f), h = acota01((Hm - 0.24f) / 0.52f);
+    static const float C[BIO_N][2] = {{0.44f, 0.30f}, {0.36f, 0.68f}, {0.84f, 0.90f}, {0.86f, 0.10f}, {0.76f, 0.40f}, {0.56f, 0.97f}, {0.05f, 0.28f}, {0.62f, 0.17f}, {0.14f, 0.66f}};
+    float tot = 0; int dom = 0;
+    for (int b = 0; b < BIO_N; b++) {
+        float dt = t - C[b][0], dh = h - C[b][1];
+        static const float SESGO[BIO_N] = {1.1f, 1.0f, 0.8f, 3.4f, 0.9f, 0.9f, 1.7f, 2.2f, 1.6f};   // para repartir las superficies
+        w[b] = SESGO[b] * std::exp(-(dt * dt + dh * dh) / 0.035f);
+        tot += w[b];
+    }
+    for (int b = 0; b < BIO_N; b++) { w[b] /= tot; if (w[b] > w[dom]) dom = b; }
+    return dom;
 }
+// cuanto desierto hay en ese punto (0 = nada, 1 = desierto completo)
+static double desierto(double bx, double bz) { float w[BIO_N]; biomaPesos(bx, bz, w); return w[BIO_DESIERTO]; }
+static int biomaDominante(double bx, double bz) { float w[BIO_N]; return biomaPesos(bx, bz, w); }
 
 // altura del terreno en bloques (bx, bz en bloques): colinas, montanas, lagunas, rios y desiertos
-static double alturaTerreno(double bx, double bz) {
+static double terrenoBase(double bx, double bz, int* domOut);
+static double alturaTerreno(double bx, double bz) { return terrenoBase(bx, bz, nullptr); }
+static double terrenoBase(double bx, double bz, int* domOut) {
+    const double WL0 = WATER_LEVEL - OFFY;
+    float w[BIO_N]; int dom = biomaPesos(bx, bz, w);
+    if (domOut) *domOut = dom;
     float base = fbm((float)bx * 0.004f, (float)bz * 0.004f, 3, 1);
     float colinas = fbm((float)bx * 0.02f, (float)bz * 0.02f, 4, 2);
     float monte = fbm((float)bx * 0.008f, (float)bz * 0.008f, 4, 3);
     monte = std::max(0.0f, (monte - 0.5f) * 2.0f);
-    double d = desierto(bx, bz);
-    double h = 16.0 + base * 14.0 + colinas * 18.0 * (1.0 - 0.55 * d) + monte * monte * 36.0 * (1.0 - d);
+    const float wD = w[BIO_DESIERTO], wM = w[BIO_MESETA], wP = w[BIO_PANTANO];
+    float hillMul = w[BIO_PRADERA] * 0.55f + w[BIO_BOSQUE] * 1.0f + w[BIO_DENSO] * 0.85f + wD * 0.45f + wM * 0.7f + wP * 0.2f +
+                    w[BIO_TUNDRA] * 0.85f + w[BIO_SABANA] * 0.40f + w[BIO_OTONO] * 0.95f;
+    float monteMul = 1.0f - 0.95f * wD - 0.75f * wP - 0.3f * wM - 0.5f * w[BIO_SABANA];
+    double h = 16.0 + base * 14.0 * (1.0 - 0.5 * wP) + colinas * 18.0 * hillMul + monte * monte * 36.0 * monteMul;
+    {   // cordilleras: se suman donde el ruido de altitud es alto (no en desierto ni pantano); las cumbres son de roca
+        float alt = fbm((float)bx * 0.0035f, (float)bz * 0.0035f, 3, 5);
+        double wMont = suave(0.57, 0.70, alt) * std::max(0.0, 1.0 - 0.9 * wD - 0.8 * wP);
+        if (wMont > 0.002) {
+            float ridge = 1.0f - std::fabs(2.0f * fbm((float)bx * 0.012f, (float)bz * 0.012f, 3, 6) - 1.0f);
+            h += wMont * (12.0 + 40.0 * ridge * ridge);
+            monte = std::max(monte, (float)wMont);
+        }
+    }
+    if (wM > 0.01f) {   // meseta: escalones de unos 7 bloques con paredes casi verticales
+        double x = (h - 14.0) / 7.5, fl = std::floor(x), fr = x - fl;
+        double st = 14.0 + 7.5 * (fl + suave(0.80, 1.0, fr)) + 9.0;
+        h = h * (1.0 - wM) + st * wM;
+    }
+    if (wP > 0.01f) {   // pantano: casi plano al nivel del agua, con charcos y montoncitos
+        float fino = fbm((float)bx * 0.03f, (float)bz * 0.03f, 3, 83);
+        double hp = WL0 + 0.2 + (fino - 0.5) * 5.0;
+        h = h * (1.0 - wP) + hp * wP;
+    }
 
     // lagunas: hondonadas redondas que se llenan de agua
     float lago = fbm((float)bx * 0.011f, (float)bz * 0.011f, 3, 21);
     double tl = suave(0.0, 1.0, (LAGO_UMBRAL - lago) / 0.16);
-    if (tl > 0) h = h * (1.0 - tl) + std::min(h, (double)WATER_LEVEL - 4.5) * tl;
+    if (tl > 0) h = h * (1.0 - tl) + std::min(h, (double)WL0 - 4.5) * tl;
 
     // rios: una franja estrecha donde el ruido cruza 0,5 (mas finos en las montanas altas)
     float r = std::fabs(fbm((float)bx * 0.0045f, (float)bz * 0.0045f, 3, 11) - 0.5f);
     double fuerza = 1.0 - suave(0.0, 0.5, monte * 2.0);
     double tr = (1.0 - suave(0.0, RIO_ANCHO, r)) * fuerza;
-    if (tr > 0) h = h * (1.0 - tr) + std::min(h, (double)WATER_LEVEL - 3.5) * tr;
+    if (tr > 0) h = h * (1.0 - tr) + std::min(h, (double)WL0 - 3.5) * tr;
 
-    return std::min(h, 82.0);
+    return std::min(h, 86.0) + OFFY;
 }
 
-static inline bool hayArbol(int tx, int tz, double* altura) {
-    if (hash2(tx, tz, 77) % 70 != 0) return false;
-    if (desierto(tx + 0.5, tz + 0.5) > 0.15) return false;        // en el desierto no hay arboles
+// capa superior del terreno segun el bioma (la usan los chunks reales y el mundo lejano)
+static inline uint8_t tipoSuperficie(int dom, double h, double bx, double bz, bool arc) {
+    h -= OFFY;                                   // las reglas estan escritas con el relieve original
+    const double WL0 = WATER_LEVEL - OFFY;
+    if (h > 52.0 + 6.0 * vnoise((float)(bx * 0.05), (float)(bz * 0.05), 91u))      // alta montana: roca (nieve en la tundra y en las cumbres)
+        return (dom == BIO_TUNDRA || h > 66.0 + 5.0 * vnoise((float)(bx * 0.07), (float)(bz * 0.07), 92u)) ? NIEVE : PIEDRA;
+    if (dom == BIO_TUNDRA) return h < WL0 + 0.2 ? (arc ? ARCILLA : ARENA) : NIEVE;
+    if (dom == BIO_DESIERTO || h < WL0 + 2.4) return arc ? ARCILLA : ARENA;
+    if (dom == BIO_PANTANO) return h < WL0 + 0.4 ? ARCILLA : (vnoise((float)(bx * 0.06), (float)(bz * 0.06), 93u) > 0.55f ? PASTO : TIERRA);
+    if (dom == BIO_MESETA) return TIERRA;
+    if (dom == BIO_SABANA) return PASTO_SECO;
+    return PASTO;
+}
+
+// vegetacion: tipo de arbol (0 roble, 1-3 otono rojo/naranja/amarillo, 4 cerezo, 5 pino, 6 acacia, 7 cactus)
+static inline bool vegetacion(int tx, int tz, double* altura, int* clase) {
+    if (hash2(tx, tz, 77) % 18 != 0) return false;                 // candidatos (1 de cada 18 bloques como maximo)
+    float w[BIO_N]; int dom = biomaPesos(tx + 0.5, tz + 0.5, w);
+    //                         prad.      bosque     denso      desierto    meseta  pantano    tundra     sabana     otono
+    static const float D[BIO_N] = {1.0f / 200, 1.0f / 40, 1.0f / 18, 1.0f / 230, 0.0f, 1.0f / 55, 1.0f / 45, 1.0f / 85, 1.0f / 22};   // arboles por bloque
+    float dens = 0;
+    for (int b = 0; b < BIO_N; b++) dens += w[b] * D[b];
+    if (hash2(tx, tz, 78) % 1000 >= (uint32_t)(dens * 18.0f * 1000.0f)) return false;
     double h = alturaTerreno(tx + 0.5, tz + 0.5);
-    if (h < WATER_LEVEL + 1.5 || h > 60.0) return false;
+    if (h < WATER_LEVEL + 1.5 || h > 60.0 + OFFY) return false;
+    uint32_t q = hash2(tx, tz, 79) % 100;
+    int k = 0;
+    switch (dom) {
+        case BIO_OTONO: k = q < 34 ? 1 : q < 62 ? 2 : q < 90 ? 3 : 4; break;
+        case BIO_BOSQUE: k = q < 8 ? 3 : q < 14 ? 2 : 0; break;
+        case BIO_TUNDRA: k = 5; break;
+        case BIO_SABANA: k = 6; break;
+        case BIO_DESIERTO: k = 7; break;
+        case BIO_PRADERA: k = q < 6 ? 4 : 0; break;
+        default: k = 0;
+    }
+    if (k == 7 && tipoSuperficie(dom, h, tx + 0.5, tz + 0.5, false) != ARENA) return false;   // el cactus solo sobre arena
+    if (k != 7 && dom == BIO_DESIERTO) return false;
     *altura = h;
+    if (clase) *clase = k;
     return true;
 }
+static inline bool hayArbol(int tx, int tz, double* altura) { return vegetacion(tx, tz, altura, nullptr); }
 
 static inline int divPiso(int a, int b) { int q = a / b; return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q; }
 
@@ -158,7 +244,7 @@ constexpr int VETA_CELDA = 12;
 struct Veta { uint8_t tipo; double cx, cy, cz, r; };      // centro y radio en bloques
 static bool vetaEnCelda(int ix, int iy, int iz, Veta& v) {
     uint32_t h = hash2((int)hash2(ix, iy, 77u), iz, 91u);
-    double yc = iy * VETA_CELDA + VETA_CELDA * 0.5;
+    double yc = iy * VETA_CELDA + VETA_CELDA * 0.5 - OFFY;   // profundidad respecto al relieve original (negativa = mas hondo)
     struct Cand { uint8_t t; double y0, y1, w, r0, r1; };
     static const Cand cand[] = {
         {CARBON, 4, 75, 0.18, 2.4, 3.6},    // comun, desde cerca de la superficie
@@ -169,10 +255,10 @@ static bool vetaEnCelda(int ix, int iy, int iz, Veta& v) {
         {CUARZO, 3, 50, 0.08, 1.6, 2.5},
         {LITIO, 2, 40, 0.04, 1.4, 2.2},
         {PLATA, 2, 30, 0.05, 1.3, 2.1},
-        {ORO, 2, 26, 0.07, 1.3, 2.0},       // raro y profundo
-        {DIAMANTE, 1, 15, 0.05, 1.0, 1.6},  // muy raro, casi en el fondo
-        {TITANIO, 1, 14, 0.03, 1.0, 1.7},
-        {URANIO, 1, 10, 0.015, 1.0, 1.5},
+        {ORO, -OFFY, 26, 0.07, 1.3, 2.0},       // raro y profundo
+        {DIAMANTE, -OFFY, 15, 0.05, 1.0, 1.6},  // muy raro, casi en el fondo
+        {TITANIO, -OFFY, 14, 0.03, 1.0, 1.7},
+        {URANIO, -OFFY, 10, 0.015, 1.0, 1.5},
         {SALITRE, 4, 55, 0.07, 1.6, 2.6},   // nitrato de potasio
         {AZUFRE, 2, 40, 0.06, 1.4, 2.4}
     };
@@ -205,15 +291,17 @@ static DatosChunk generarChunk(int cx, int cy, int cz) {
     const int ox = cx * CS, oy = cy * CS, oz = cz * CS;
     static thread_local int top[CS * CS];
     static thread_local float hb[CS * CS];
-    static thread_local bool desiertoCol[CS * CS];
+    static thread_local uint8_t bioCol[CS * CS];
     static thread_local bool arcillaCol[CS * CS];
     static thread_local bool entradaCol[CS * CS];
     int minTop = INT_MAX, maxTop = INT_MIN;
     for (int lz = 0; lz < CS; lz++)
         for (int lx = 0; lx < CS; lx++) {
-            double h = alturaTerreno((ox + lx + 0.5) / SUB, (oz + lz + 0.5) / SUB);
+            int dom = 0;
+            double h = terrenoBase((ox + lx + 0.5) / SUB, (oz + lz + 0.5) / SUB, &dom);
+            // (la misma correccion de lagunas y rios que alturaTerreno se hace dentro de terrenoBase)
             hb[lz * CS + lx] = (float)h;
-            desiertoCol[lz * CS + lx] = desierto((ox + lx + 0.5) / SUB, (oz + lz + 0.5) / SUB) > 0.5;
+            bioCol[lz * CS + lx] = (uint8_t)dom;
             arcillaCol[lz * CS + lx] = h < WATER_LEVEL - 0.6 &&
                                        vnoise((float)((ox + lx + 0.5) / SUB * 0.07), (float)((oz + lz + 0.5) / SUB * 0.07), 53u) > 0.52f;
             entradaCol[lz * CS + lx] = h > WATER_LEVEL + 3.0 &&
@@ -247,42 +335,68 @@ static DatosChunk generarChunk(int cx, int cy, int cz) {
     for (int lz = 0; lz < CS; lz++)
         for (int lx = 0; lx < CS; lx++) {
             int t = top[lz * CS + lx];
-            bool arenoso = hb[lz * CS + lx] < WATER_LEVEL + 2.4f || desiertoCol[lz * CS + lx];
+            const int dom = bioCol[lz * CS + lx];
+            const bool arcC = arcillaCol[lz * CS + lx];
+            const uint8_t sup = tipoSuperficie(dom, hb[lz * CS + lx], (ox + lx + 0.5) / SUB, (oz + lz + 0.5) / SUB, arcC);
             for (int ly = 0; ly < CS; ly++) {
                 int vy = oy + ly;
                 uint8_t tp;
                 if (vy <= t) {
                     int prof = (t - vy) / SUB;
-                    bool arc = arcillaCol[lz * CS + lx];
-                    if (vy > t - SUB) tp = arenoso ? (arc ? ARCILLA : ARENA) : PASTO;
-                    else if (prof < 4) tp = arenoso ? (arc && prof < 2 ? ARCILLA : ARENA) : TIERRA;
+                    if (vy > t - SUB) tp = sup;
+                    else if (dom == BIO_MESETA && sup != PIEDRA && prof < 20) {          // estratos de colores en las paredes de la meseta
+                        static const uint8_t B[6] = {TIERRA, TIERRA, ARENA, TIERRA, ARENA, ARENA};
+                        tp = B[(((vy / SUB) % 6) + 6) % 6];
+                    }
+                    else if (prof < 4) tp = (sup == PASTO || sup == PASTO_SECO || (sup == NIEVE && dom == BIO_TUNDRA && hb[lz * CS + lx] < 52.0f)) ? TIERRA : (sup == NIEVE ? PIEDRA : (sup == ARCILLA && prof >= 2 ? ARENA : sup));
                     else tp = PIEDRA;
-                } else if (vy < WATER_LEVEL * SUB) tp = AGUA;
+                } else if (vy < WATER_LEVEL * SUB) tp = (dom == BIO_TUNDRA && vy >= (WATER_LEVEL - 1) * SUB) ? HIELO : AGUA;     // lagos helados en la tundra
                 else tp = AIRE;
                 dt[IDX(lx, ly, lz)] = tp;
             }
-            // arboles cercanos (tronco 1 bloque de ancho, copa redonda de hojas)
+            // vegetacion cercana (tronco 1 bloque de ancho; copas segun el tipo de arbol)
             int bx = divPiso(ox + lx, SUB), bz = divPiso(oz + lz, SUB);
             for (int tz = bz - 3; tz <= bz + 3; tz++)
                 for (int tx = bx - 3; tx <= bx + 3; tx++) {
-                    double ha;
-                    if (!hayArbol(tx, tz, &ha)) continue;
-                    int vb = (int)std::floor(ha * SUB) + 1 - 2;      // base del tronco (cubitos)
-                    int altoTronco = 6 * SUB;
+                    double ha; int kv;
+                    if (!vegetacion(tx, tz, &ha, &kv)) continue;
+                    const int vb = (int)std::floor(ha * SUB) + 1 - 2;      // base del tronco (cubitos)
+                    const double dxw = (ox + lx + 0.5) * VS - (tx + 0.5), dzw = (oz + lz + 0.5) * VS - (tz + 0.5);
+                    const double dxz = dxw * dxw + dzw * dzw;
+                    if (kv == 7) {   // cactus: columna de 3-4 bloques con un brazo
+                        int alto = 3 + (int)(hash2(tx, tz, 81) % 2);
+                        int dir = (hash2(tx, tz, 82) & 1) ? 1 : -1;
+                        for (int ly = 0; ly < CS; ly++) {
+                            int vy = oy + ly;
+                            if (tx == bx && tz == bz && vy >= vb && vy < vb + alto * SUB) dt[IDX(lx, ly, lz)] = CACTUS;
+                            if (tx + dir == bx && tz == bz && vy >= vb + SUB && vy < vb + 3 * SUB) dt[IDX(lx, ly, lz)] = CACTUS;
+                        }
+                        continue;
+                    }
+                    static const uint8_t HT[8] = {HOJAS, HOJA_ROJA, HOJA_NARANJA, HOJA_AMARILLA, HOJA_ROSA, HOJA_PINO, HOJAS, HOJAS};
+                    const uint8_t hoja = HT[kv];
+                    const int bTronco = kv == 5 ? 7 : kv == 6 ? 5 : 6;
                     if (tx == bx && tz == bz) {
                         for (int ly = 0; ly < CS; ly++) {
                             int vy = oy + ly;
-                            if (vy >= vb && vy < vb + altoTronco) dt[IDX(lx, ly, lz)] = MADERA;
+                            if (vy >= vb && vy < vb + bTronco * SUB) dt[IDX(lx, ly, lz)] = MADERA;
                         }
                     }
-                    double cxw = tx + 0.5, czw = tz + 0.5, cyw = (vb + altoTronco - SUB) * VS;
-                    double dx = (ox + lx + 0.5) * VS - cxw, dz = (oz + lz + 0.5) * VS - czw;
-                    double dxz = dx * dx + dz * dz;
                     if (dxz > 7.5) continue;
                     for (int ly = 0; ly < CS; ly++) {
                         int vy = oy + ly;
-                        double dy = (vy + 0.5) * VS - cyw;
-                        if (dxz + dy * dy * 1.6 <= 7.2 && dt[IDX(lx, ly, lz)] == AIRE) dt[IDX(lx, ly, lz)] = HOJAS;
+                        double yb = (vy + 0.5) * VS - vb * VS;      // altura sobre la base del tronco, en bloques
+                        bool leaf;
+                        if (kv == 5) {            // pino: cono
+                            double r = 2.4 * (9.6 - yb) / 7.6 + 0.2;
+                            leaf = yb >= 2.0 && yb <= 9.6 && dxz <= r * r;
+                        } else if (kv == 6) {     // acacia: sombrilla plana y ancha
+                            leaf = (yb >= 4.4 && yb < 5.3 && dxz <= 7.2) || (yb >= 5.3 && yb < 6.2 && dxz <= 3.4);
+                        } else {                  // redonda (roble, otono, cerezo)
+                            double dy = yb - (bTronco - 1.0);
+                            leaf = dxz + dy * dy * 1.6 <= 7.2;
+                        }
+                        if (leaf && dt[IDX(lx, ly, lz)] == AIRE) dt[IDX(lx, ly, lz)] = hoja;
                     }
                 }
         }
@@ -314,12 +428,12 @@ static DatosChunk generarChunk(int cx, int cy, int cz) {
                 int limite = entradaCol[lz * CS + lx] ? tcol : tcol - 4 * SUB;
                 if (vy > limite) continue;
                 uint8_t& c = dt[IDX(lx, ly, lz)];
-                if (c == AIRE || c == AGUA || c == MADERA || c == HOJAS) continue;
+                if (c == AIRE || c == AGUA || esVeg(c)) continue;
                 int cx_ = lx / G, cy_ = ly / G, cz_ = lz / G;
                 float fx = (lx + 0.5f) / G - cx_, fy = (ly + 0.5f) / G - cy_, fz = (lz + 0.5f) / G - cz_;
                 float n1 = mezcla(f1, cx_, cy_, cz_, fx, fy, fz) - 0.5f, n2 = mezcla(f2, cx_, cy_, cz_, fx, fy, fz) - 0.5f;
                 bool abre = n1 * n1 + n2 * n2 < 0.0070f;                               // tunel
-                if (!abre && by < 46.0) abre = mezcla(f3, cx_, cy_, cz_, fx, fy, fz) > 1.02f;   // sala
+                if (!abre && by < 46.0 + OFFY) abre = mezcla(f3, cx_, cy_, cz_, fx, fy, fz) > 1.02f;   // sala
                 if (abre) c = AIRE;
             }
         }

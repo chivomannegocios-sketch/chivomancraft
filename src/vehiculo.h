@@ -85,6 +85,9 @@ struct Veh {
     double radio = 4;
     VMalla cuerpo, vidrio;
     std::vector<VHelice> helices;
+    int pilotoRed = -1;                      // red: id del otro jugador que lo pilota (-1 = nadie)
+    bool objValido = false;                  // red: hay una pose objetivo recibida
+    V3 objP{0, 0, 0}, objV{0, 0, 0}; double objYaw = 0, objPitch = 0, objRoll = 0, objGas = 0; bool objSuelo = false;
 };
 static Veh g_veh;
 static bool g_pedirG = false, g_pedirH = false;
@@ -93,6 +96,7 @@ static V3 g_L{0, 0, 0}, g_vL{0, 0, 0}; // posicion y velocidad locales (bloques)
 static double g_aireVeh = 0;
 static bool g_saltoVeh = false;
 static void vehEntrar();
+static std::function<void()> g_vehHookSet, g_vehHookClear;   // red: avisan al ensamblar / desarmar
 static int g_avionOrg[3] = {0, 0, 0};   // (pruebas)
 
 // base del vehiculo: adelante, derecha, arriba
@@ -395,11 +399,13 @@ static void vehEnsamblar(int sx, int sy, int sz) {
                   v.sust > 0 ? "" : " (ALAS CORTAS: NO VUELA)");
     aviso(b);
     vehGuardar();
+    if (g_vehHookSet) g_vehHookSet();
 }
 
 static void vehDesarmar() {
     Veh& v = g_veh;
     if (!v.activo || v.pilotando) return;
+    if (v.pilotoRed >= 0) { aviso("OTRO JUGADOR LA ESTA PILOTANDO"); return; }
     double yw = v.yaw;
     int k = (int)std::lround(yw / (3.14159265358979 / 2));
     int fx = 0, fz = -1;
@@ -426,6 +432,8 @@ static void vehDesarmar() {
     if (perdidas) std::snprintf(b, sizeof b, "DESARMADA (%d CUBITOS NO CUPIERON)", perdidas); else std::snprintf(b, sizeof b, "DESARMADA");
     aviso(b);
     vehGuardar();
+    v.objValido = false; v.pilotoRed = -1;
+    if (g_vehHookClear) g_vehHookClear();
 }
 
 // ---------------------------------------------------------------- subir / bajar
@@ -443,6 +451,7 @@ static void vehSubirBajar() {
         return;
     }
     if (!v.activo) return;
+    if (v.pilotoRed >= 0) { aviso("OTRO JUGADOR LA ESTA PILOTANDO"); return; }
     V3 d = {g_j.p.x - v.p.x, g_j.p.y - v.p.y, g_j.p.z - v.p.z};
     if (std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) > std::max(14.0, v.radio + 8.0)) { aviso("ACERCATE A LA AVIONETA"); return; }
     if (!v.nAsiento) { aviso("FALTA UN ASIENTO"); return; }
@@ -565,8 +574,23 @@ static bool solidoEn(int x, int y, int z) {
     return c && esSolido(t);
 }
 
+// red: el que no la simula (no es el piloto ni el anfitrion libre) solo sigue la pose que llega
+static void vehSeguir(double dt) {
+    Veh& v = g_veh;
+    if (!v.objValido) return;
+    double k = std::min(1.0, dt * 14.0);
+    V3 d = v.objP - v.p;
+    if (d.x * d.x + d.y * d.y + d.z * d.z > 100.0) v.p = v.objP; else v.p = v.p + d * k;
+    auto ang = [&](double a, double b) { double e = b - a; while (e > 3.14159265) e -= 6.2831853; while (e < -3.14159265) e += 6.2831853; return a + e * k; };
+    v.yaw = ang(v.yaw, v.objYaw); v.pitch += (v.objPitch - v.pitch) * k; v.roll += (v.objRoll - v.roll) * k;
+    v.v = v.objV; v.gas = v.objGas; v.suelo = v.objSuelo;
+    v.angHel += (3.0 + v.gas * 90.0) * dt;
+    if (v.angHel > 6.2831853 * 50) v.angHel -= 6.2831853 * 50;
+}
+static bool g_vehCinematico = false;     // la pone el juego: true si en esta maquina la avioneta solo sigue a la red
 static void vehPaso(GLFWwindow* w, double dt) {
     Veh& v = g_veh;
+    if (g_vehCinematico && !v.pilotando) { vehSeguir(dt); return; }
     auto K = [&](int k) { return glfwGetKey(w, k) == GLFW_PRESS; };
     const double G = 11.0, VR = 13.0, KD = 0.0045, EMPUJE = 7.0;
     const bool piloto = v.pilotando;
