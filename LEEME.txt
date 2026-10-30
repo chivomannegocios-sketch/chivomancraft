@@ -280,3 +280,191 @@ NOVEDADES v32 - ROMPER BLOQUES MAS FLUIDO Y MENU DE RENDIMIENTO
          (usa mas CPU y mas RAM para cargar terreno mas rapido; se guarda en opciones.txt)
       CONSERVAR CHUNKS: SI / NO  -> los chunks ya cargados se quedan en RAM al alejarte (hasta ~8000 con datos,
          unos 250 MB; despues se descartan los mas lejanos) y no hay que volver a calcularlos.
+
+NOVEDADES v33 (usa un MUNDO NUEVO para ver los biomas)
+- Montañas nevadas: picos altos con nieve y pinos.
+- Playas y costas: franjas de arena junto al mar.
+- Océano: poco profundo como Minecraft (casi siempre 3-12 bloques, máximo ~19), fondo de arena/grava/arcilla e islas.
+- Bosque de cerezos: bioma completo de cerezos rosados.
+- Cañón / badlands: franjas de colores y cañones.
+
+NOVEDADES v34 (usa un MUNDO NUEVO)
+Biomas nuevos, con bloques nuevos (11 bloques mas en el menu E, 63 en total):
+- Selva: arboles enormes (tronco de 2x2 bloques y copa gigante), lianas colgando, bambu y madera/hojas de selva.
+- Taiga de nieve: pinos con nieve encima (hojas nevadas), arbustos de bayas y suelo nevado.
+- Campo de flores: pradera con muchisimas flores rojas, amarillas, azules y rosas. Las flores son objetos delgados:
+  se atraviesan, no tapan la luz y no hacen sombra. (Tambien salen algunas sueltas en praderas, bosques y cerezos.)
+- Mundo helado: llanura de hielo con icebergs altos de hielo compacto (azul grueso); el mar frio se congela y tiene icebergs.
+Bloques nuevos: MADERA SELVA, HOJAS SELVA, LIANA, BAMBU, HOJAS NEVADAS, ARBUSTO BAYAS, FLOR ROJA/AMARILLA/AZUL/ROSA, HIELO COMPACTO.
+Mejora interna: los arboles de cada chunk se calculan una sola vez (antes se repetia por cada cubito), asi que cargar chunks es un poco mas rapido.
+
+NOVEDADES v35 (graficos mejorados, tecla de graficos activada)
+- Agua estilo Photon: olas animadas, reflejo del cielo segun el angulo (Fresnel), brillo del sol y color mas profundo.
+- Nubes volumetricas: suaves y con volumen, con luz del sol, sombra propia y borde plateado; cambian de color al atardecer.
+  Con los graficos mejorados apagados (y en el celular) se siguen usando las nubes de cajas de antes.
+
+v35b - Pausa: junto a GRAFICOS hay un boton AJUSTES con: NUBES (volumetricas / simples / apagadas), AGUA (simple / mejorada / mejorada + olas)
+y SOMBRAS Y EFECTOS (ON/OFF). Se guardan en opciones.txt. ESC dentro de AJUSTES vuelve a la pausa.
+
+v36 - Agua: ahora cambia de color segun la profundidad (turquesa y transparente en lo somero, azul oscuro y opaco en lo hondo),
+tiene espuma animada en la orilla, y se ve limpia desde abajo al bucear. Se activa con AGUA: MEJORADA o MEJORADA + OLAS.
+
+v37 - Agua: sin centelleo visto desde la orilla. Las olas finas se apagan cuando son mas chicas que un pixel y, de lado y a lo lejos,
+el agua se alisa (como en los shaders buenos); el brillo del sol no se toca.
+
+v38 - Agua: se quito el oscurecimiento/cambio de color por profundidad (color fijo). Solo queda la espuma de la orilla,
+que usa 3 niveles de profundidad, asi el mar abierto vuelve a dibujarse con pocos triangulos.
+
+v39 - Agua: desde fuera vuelve a verse como en v37 (color y transparencia segun profundidad, espuma). Buceando ya no se oscurece con la profundidad.
+
+v40 - Cielo con atmosfera: neblina clara en el horizonte, resplandor del sol, atardeceres con banda naranja hacia el sol y rosa/violeta al lado opuesto,
+estrellas con brillo y colores distintos que titilan, via lactea tenue y halo de la luna. Las nubes del atardecer ahora son naranjas/rosadas.
+Viento: hojas, arbustos, lianas, flores y bambu se mecen. En AJUSTES (pausa) hay CIELO: ATMOSFERA/SIMPLE y VIENTO EN HOJAS: ON/OFF.
+
+v41 - Zonas editadas lejanas: ya no se dibuja lo enterrado
+  - Las columnas que editaste y quedan lejos (se siguen viendo como chunks reales) ahora ocultan
+    lo que esta por debajo de su superficie REAL (cuevas, minas): ni la imagen ni las SOMBRAS
+    lo dibujan. Se calcula con la altura real del suelo (con tus cambios) de la columna y sus vecinas.
+  - Lo mismo en el mapa de sombras: no se dibujan chunks enterrados (salvo a menos de 3 chunks tuyos, donde excavas).
+
+v42 - Version con bloques 1x1 (SUB=1) para comparar
+  - compilar_sub1.bat compila y abre el juego con 1 cubito por bloque (como Minecraft), en la carpeta build_sub1.
+    El juego normal (compilar_y_jugar.bat, 2x2) no cambia.
+  - Los mundos de cada version se guardan aparte (mundos = 2x2, mundos_sub1 = 1x1): no se mezclan.
+  - Tambien se puede probar SUB=4 u 8: cmake ... -DSUB_VAL=4
+
+v43 - El terreno lejano ahora tapa lo que esta debajo (arregla manchas negras de zonas editadas lejanas)
+  - Antes: el terreno lejano se dibujaba primero y luego se borraba su profundidad, asi que los chunks reales editados
+    (cuevas, subsuelo sin luz = negro) se pintaban ENCIMA aunque estuvieran bajo la superficie.
+  - Ahora: tras dibujar lo lejano se vuelve a escribir su profundidad (3 bloques mas abajo) con la camara real,
+    como una pared invisible: lo que queda por debajo ya no se ve; lo que sobresale (tus construcciones) si.
+  - Para comparar: ejecutar con la variable NOLODTAPA=1 desactiva este cambio.
+
+v44 - El agua lejana tambien tapa (zonas editadas sobre agua)
+  - El agua del mundo lejano ahora tambien escribe su profundidad (2 bloques mas abajo): el fondo oscuro de los chunks
+    reales editados que estan bajo el agua ya no se ve a traves de ella.
+  - Las columnas editadas ahora SI llevan agua lejana (antes quedaba un hueco sin agua en esas columnas).
+  - NOLODTAPA=1 desactiva ambos cambios (v43 y v44).
+
+v45 - Prueba de rendimiento: CIUDAD DE LUCES (tecla F9)
+  - Estando en un mundo, pulsa F9: construye delante de ti (a escala de cubitos) 16 edificios de 20x20 bloques y de 20 a 56 de alto,
+    con pisos, ventanas, pilares, miles de luces LED de 12 colores en los techos, postes de luz y antorchas en las calles.
+  - Cuando todos los chunks tienen malla y luz, mide 20 segundos girando la camara (no te muevas) y muestra el resultado en pantalla:
+    FPS promedio, FPS de el 1% peor, peor cuadro y cuanto tardo en mallarse. Tambien lo agrega a rendimiento.txt (en la carpeta del juego).
+  - Hazlo en un mundo de prueba (queda guardado como cualquier construccion). Repitelo en 2x2 y en 1x1 para comparar.
+
+v46 - LAVA
+  - Bloque nuevo LAVA (esta en el menu de materiales): brilla, ilumina de naranja, tiene manchas animadas.
+    No es solido: te hundes despacio (como en el agua pero mas lento). En survival quema (2 de dano cada medio segundo).
+    No se puede romper (como el agua). Por ahora es estatica (no fluye).
+  - Se genera sola: en lo hondo (por debajo de 25 bloques bajo el nivel del mar) el hueco de las cuevas y tuneles se llena de lava,
+    como en Minecraft. Los chunks ya guardados no cambian; las zonas nuevas si la traen.
+
+v47: lagunas de lava pequenas y al azar (manchas ~10 bloques, algo menos frecuentes, tope plano); mas probables cuanto mas hondo, y muchas cuevas no tienen lava.
+v47: las lagunas de lava son poco hondas (3 bloques) y se apoyan en el suelo de la cueva.
+v47: lava 0% en los primeros 15 bloques bajo la entrada de la cueva; desde ahi ~0.1% hasta y=78; bajo 78 sube con la profundidad.
+v47: lagunas de superficie plana (niveles cada 8 bloques, franja de 3 bloques bajo el nivel); ya no salen 'paredes' de lava en los escalones.
+v47: lava en lagunas de 1 bloque de grosor, tope plano, apoyada en suelo y con al menos un costado solido (nada apilado ni colgando).
+v47: lava como Minecraft: (A) lagunas planas de 1 bloque rebajadas en el piso plano de las cuevas; (B) bolsas pequenas encerradas en roca que se encuentran al excavar. 0% en los primeros 15 bloques, ~0.1% hasta y=78 y mas hondo mas frecuente.
+v47: las lagunas de piso ya no salen como lineas finas en tuneles: piden al menos ~3 bloques de ancho de piso plano.
+v47: el hoyo de la lava siempre tiene fondo solido (nunca lava sobre aire).
+v47: borde de piedra a los costados de la lava (solo lados) para que no queden lavas sueltas ni paredes.
+v47b: la ciudad (F9) ahora se guarda COMPLETA: antes solo se marcaban para guardar unos pocos chunks (3 de 184), el resto desaparecia al alejarte y volver. Si faltan chunks por cargar al pulsar F9 avisa 'CIUDAD INCOMPLETA'.
+
+v48: OCEANO CON VIDA.
+ - Bloques nuevos (en el menu de materiales, al final): 6 corales de colores, ALGA (hoja fina que se mece) y GRAVA.
+ - Arrecifes de coral en mares calidos (2 a 20 bloques de agua), bosques de algas altas y pasto marino en el fondo.
+ - Fondo marino variado: arena clara en lo somero, grava / arcilla / roca en manchas, y en lo hondo roca y grava oscuras.
+ - Mar profundo: el oceano mar adentro llega a ~50 bloques de profundidad; el agua se vuelve casi negra.
+ - Bajo el agua: niebla azul que se oscurece y se acorta con la profundidad.
+ - Mundos ya guardados: solo cambian las zonas que aun no hayas visitado.
+
+v49 - MARES PROFUNDOS OPCIONAL
+ - En el menu de mundos hay un boton "MARES PROFUNDOS: NO/SI" (tecla P) junto a NUEVO MUNDO.
+ - Por defecto NO (mares poco profundos). Solo afecta a mundos NUEVOS; los viejos no cambian.
+ - La opcion se guarda en la semilla (bit 24), asi que tambien funciona en red.
+
+v50 - CLIMA
+ - Estados: despejado, nublado, lluvia, tormenta (con rayos) y niebla. Cambian solos cada 80-240 s con transicion suave.
+ - Tecla K: cambia el clima a mano (despejado > nublado > lluvia > tormenta > niebla).
+ - En biomas frios (tundra, glaciar, taiga, picos, mar polar) la lluvia cae como NIEVE.
+ - Con clima el cielo se pone gris, sol/luna/estrellas se tapan, las nubes se densifican, las sombras se suavizan y la niebla acorta la vision.
+ - Bajo techo, cuevas o arboles densos la lluvia/nieve no cae. Bajo el agua no se dibuja.
+ - El clima es local de cada jugador (no se sincroniza por red todavia). No hay sonido de lluvia/truenos: el juego aun no tiene audio.
+ - Pruebas (variables de entorno): CLIMA=0..4, NIEVE=1, RAYOTEST=1.
+
+v51 - POLVORA Y TNT
+ - POLVORA (objeto, solo survival): receta 3 SALITRE + 1 CARBON + 1 AZUFRE = 2 POLVORA.
+ - TNT (bloque): receta 4 POLVORA = 8 TNT (un bloque entero). En creativo el TNT sale en el menu de materiales.
+ - Encender: ten la ANTORCHA en la mano y haz clic sobre el TNT. Todo el TNT pegado parpadea 3 segundos y explota.
+ - La explosion hace un crater redondo (1 bloque de TNT = radio ~4.5 bloques; mas TNT junto = mas grande, maximo 12),
+   enciende en cadena el TNT cercano, te empuja y en survival te hace dano segun la distancia.
+ - La lista de recetas ahora cabe 26 (13 por columna).
+ - Pruebas: PRUEBA_TNT=<cuadro>, TNT_LARGO=1.
+
+v52 - MENU DE MATERIALES POR PAGINAS
+ - El menu (tecla E) muestra 5 filas x 10 columnas (50 objetos) por pagina.
+ - Flecha DERECHA (arriba, a un lado del titulo) = pagina siguiente; flecha IZQUIERDA = anterior. Tambien sirve la rueda del raton.
+ - Arriba aparece "PAGINA a/b". Las flechas solo salen si hay mas de una pagina (en survival crece con tu inventario).
+ - Prueba: PRUEBA_MENU=<pagina>.
+
+v53 - SUBIR AL ESPACIO (solo visual)
+ - A partir de ~250 bloques de altura el cielo se oscurece y salen las estrellas; hacia ~1600 ya es espacio negro.
+ - Desde ~300 bloques aparece la Tierra debajo como una esfera enorme con continentes, nubes, polos y un halo azul de atmosfera.
+   A mas altura se ve mas pequena y completa (a unos 40000 bloques parece una canica con su sol al lado).
+ - Tecla J (solo creativo): sube 500 bloques de golpe y activa el vuelo, para probarlo sin volar mucho rato.
+ - Todavia NO hay cohete, luna ni gravedad baja: es solo el efecto visual del ascenso.
+ - Pruebas: PITCH=<radianes> junto con TELE=x,z,yaw,alto.
+
+v54 - ESPACIO: MAPA REAL, ESTRELLAS POR TODOS LADOS, SIN ATARDECER ARRIBA
+ - La Tierra que ves desde arriba ahora es TU mundo: oceanos (mas oscuros donde son profundos), biomas con su color,
+   hielo en el polo y mares polares. Se calcula en segundo plano al pasar de ~200 bloques de altura (tarda un par de segundos
+   y aparece con un fundido) y se recalcula si te alejas ~5000 bloques.
+ - En el espacio las estrellas y la via lactea salen en TODAS las direcciones (tambien al mirar hacia la Tierra).
+ - La franja naranja del atardecer y el brillo de neblina del sol se van al subir (~250 a ~1600 bloques). El sol se ve mas fuerte.
+   Opcion para dejarlos: Pausa > AJUSTES > "ATARDECER EN EL ESPACIO: SI/NO" (por defecto NO).
+
+v55 - EL CLIMA NO AFECTA POR ENCIMA DE LAS NUBES
+ - Entre ~230 y ~320 bloques de altura (la capa de nubes) el efecto del clima se va apagando; mas arriba ya no hay cielo gris,
+   ni sol/luna tapados, ni niebla, ni lluvia/nieve, ni destellos de rayos. Abajo todo sigue igual.
+
+v56 - COHETE DE DOS ETAPAS: COMANDO /cohete
+ - Pulsa ENTER (tambien en un mundo solo), escribe /cohete y ENTER: aparece un cohete de ~110 cubitos (~55 bloques) delante de ti,
+   sobre una plataforma de piedra: 1a etapa con 5 toberas y 4 aletas, interetapa oscura, 2a etapa con ventanas, ojiva y punta.
+ - Tiene una puerta (frente a ti), una cabina hueca con ventanas y panel de luces, y una escalera de 20 escalones hasta la puerta.
+ - Necesita espacio: si el lugar es muy alto avisa; si hay chunks sin cargar avisa y puedes repetirlo. Es local (no se sincroniza en red).
+ - Todavia NO despega: el viaje a la luna viene despues. Pruebas: PRUEBA_COHETE=<cuadro>, COHETE_VER=1|2.
+
+v57 - DESPEGUE DEL COHETE: ETAPA 1, SEPARACION Y ORBITA CON GRAVEDAD 0
+ - /cohete ahora construye tambien una TORRE con 4 tramos de escaleras en zigzag (77 escalones) hasta la puerta de la cabina.
+   La cabina paso a la ETAPA 2 (para que no se suelte con la etapa 1). El cohete queda a 40 bloques delante de ti.
+ - Entra a la cabina y pulsa L: cuenta atras de 5 s (humo y temblor), despegue con llamas, inclinacion gradual y,
+   a ~1500 bloques de altura, SEPARACION: la etapa 1 queda atras girando y la nave sigue en ORBITA con gravedad 0.
+ - En orbita: W/S, A/D y Q/E giran la nave (para apuntar luego a la Luna), mouse = camara, TAB = camara dentro de la cabina,
+   G = volver a la Tierra (el cohete se pierde; /cohete para otro).
+ - Todavia NO hay impulso a la Luna (tecla 2), ni aterrizaje, ni Luna. Es local (no se sincroniza en red).
+ - Si sales del juego en pleno vuelo, el cohete se pierde.
+ - Pruebas: PRUEBA_LANZAR=<cuadro>, CK_MULT=<n> (acelera el tiempo), CK_GIRO=w,a,q, COHETE_VER=1|2|3|9 + COHETE_POS.
+
+v58 - VIAJE A LA LUNA
+ - En orbita: gira con W/S A/D Q/E hasta poner la PROA sobre la marca LUNA y MANTEN la tecla 2 (motor, gasta combustible).
+ - La Luna atrae cuando estas cerca; al llegar, piloto automatico frena a ~300 bloques de la superficie ("LLEGASTE A LA LUNA").
+ - La Tierra se ve como esfera con tu mapa; la Luna es esfera con crateres.
+ - Aun no: aterrizaje de costado ni mundo lunar.
+
+v59 - ATERRIZAJE EN LA LUNA
+ - En la Luna (LLEGASTE A LA LUNA) mantén 2: empieza el descenso. La gravedad lunar te jala; gira con W/S A/D Q/E.
+ - A ~90 bloques de altura se carga el suelo lunar real (llanura de aterrizaje, crateres, cielo negro, Tierra grande, gravedad 1/6).
+ - Al tocar el suelo la nave se desarma en bloques (queda tumbada, se puede pisar) y tu quedas de pie al lado.
+ - /luna en el chat: te lleva directo al mundo lunar para probarlo (sin cohete).
+ - La Luna se guarda en la carpeta luna/ dentro de tu mundo; al salir del juego vuelves a la Tierra.
+
+v60 - arreglo del aterrizaje: el descenso solo empieza cuando la nave ya esta frenada (antes podia llegar al suelo a velocidad enorme y atravesarlo); el suelo bajo los restos se calcula bien aunque aun no haya cargado.
+
+v61 - LUNA CON FASES
+ - El sol en el espacio es fijo: la Luna se ve a medias (un lado claro, otro oscuro). La Tierra mantiene su tamano real al llegar a la Luna (ya no crece).
+ - Al llegar veras LUZ EN EL SUELO y una marca SOL (el punto donde el sol cae de frente). Vuela hacia el con 2 (gira con W/S A/D Q/E; el estabilizador mantiene ~300 bloques de altura).
+ - Pulsa 3 para descender. En el lado oscuro no te deja (salvo que no quede combustible: aterrizaje de emergencia a oscuras).
+ - Combustible: 1.5 por segundo de motor (100 en total). En la Luna el sol y las sombras salen de donde estas.
+
+v62 - la Luna usa el MISMO sol del juego (segun la hora): si su lado visible esta oscuro, vuela al lado claro (marca SOL, tecla 2) y pulsa 3 para descender. Ya no hay sol fijo en el espacio.

@@ -13,10 +13,15 @@ void main(){
 // ---- sombras: solo profundidad desde el sol
 static const char* VSH_SRC = R"(#version 330 core
 layout(location=0) in vec3 aPos;
+layout(location=1) in vec4 aInfo;
 uniform mat4 uSVP;
 uniform vec3 uRel;
 uniform float uVS;
-void main(){ gl_Position = uSVP * vec4(uRel + aPos * uVS, 1.0); })";
+void main(){
+    int tp = int(aInfo.x + 0.5);
+    if (tp == 75 || (tp >= 79 && tp <= 82)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }   // lianas y flores: sin sombra
+    gl_Position = uSVP * vec4(uRel + aPos * uVS, 1.0);
+})";
 static const char* FSH_SRC = R"(#version 330 core
 void main(){})";
 

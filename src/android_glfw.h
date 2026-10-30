@@ -42,7 +42,14 @@
 #define GLFW_KEY_D 68
 #define GLFW_KEY_F 70
 #define GLFW_KEY_F5 294
+#define GLFW_KEY_F9 298
 #define GLFW_KEY_N 78
+#define GLFW_KEY_P 80
+#define GLFW_KEY_K 75
+#define GLFW_KEY_J 74
+#define GLFW_KEY_L 76
+#define GLFW_KEY_2 50
+#define GLFW_KEY_3 51
 #define GLFW_KEY_ENTER 257
 #define GLFW_KEY_BACKSPACE 259
 #define GLFW_KEY_KP_ENTER 335

@@ -89,6 +89,7 @@ typedef ptrdiff_t GLsizeiptr, GLintptr;
     X(void, glViewport, (GLint, GLint, GLsizei, GLsizei)) \
     X(void, glBlendFunc, (GLenum, GLenum)) \
     X(void, glDepthMask, (GLboolean)) \
+    X(void, glColorMask, (GLboolean, GLboolean, GLboolean, GLboolean)) \
     X(void, glCullFace, (GLenum)) \
     X(void, glFrontFace, (GLenum)) \
     X(void, glDrawElements, (GLenum, GLsizei, GLenum, const void*)) \

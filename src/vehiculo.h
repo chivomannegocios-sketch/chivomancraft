@@ -34,6 +34,17 @@ static void colorPieza(uint8_t t, float* c) {
         default:
             if (esLed(t)) { const float* k = LED_RGB[t - LED_ROJO]; r = k[0]; g = k[1]; b = k[2]; }
             else if (t >= CARR_0 && t <= CARR_11) { const float* k = COLOR_CARR[t - CARR_0]; r = k[0]; g = k[1]; b = k[2]; }
+            else switch (t) {      // bloques normales (el cohete)
+                case NIEVE: r = 0.93f; g = 0.94f; b = 0.96f; break;
+                case PIEDRA: r = 0.52f; g = 0.53f; b = 0.56f; break;
+                case CARBON: r = 0.09f; g = 0.09f; b = 0.11f; break;
+                case COBRE: r = 0.80f; g = 0.45f; b = 0.24f; break;
+                case ARCILLA: r = 0.58f; g = 0.44f; b = 0.38f; break;
+                case TITANIO: r = 0.70f; g = 0.72f; b = 0.77f; break;
+                case ALUMINIO: r = 0.80f; g = 0.82f; b = 0.86f; break;
+                case HIERRO: r = 0.60f; g = 0.60f; b = 0.64f; break;
+                default: break;
+            }
     }
     c[0] = r; c[1] = g; c[2] = b;
 }
@@ -84,6 +95,7 @@ struct Veh {
     V3 ojo{0, 0, 0};                         // ojo del piloto (bloques, local)
     double radio = 4;
     VMalla cuerpo, vidrio;
+    bool libre = false; V3 bf{0, 0, -1}, br{1, 0, 0}, bu{0, 1, 0};   // actitud libre (cohete en el espacio): base propia en vez de yaw/pitch/roll
     std::vector<VHelice> helices;
     int pilotoRed = -1;                      // red: id del otro jugador que lo pilota (-1 = nadie)
     bool objValido = false;                  // red: hay una pose objetivo recibida
@@ -101,6 +113,7 @@ static int g_avionOrg[3] = {0, 0, 0};   // (pruebas)
 
 // base del vehiculo: adelante, derecha, arriba
 static void vehBase(const Veh& v, V3& f, V3& r, V3& u) {
+    if (v.libre) { f = v.bf; r = v.br; u = v.bu; return; }
     double cp = std::cos(v.pitch), sp = std::sin(v.pitch);
     V3 r0 = {std::cos(v.yaw), 0, std::sin(v.yaw)};
     V3 f0 = {std::sin(v.yaw) * cp, sp, -std::cos(v.yaw) * cp};
@@ -273,8 +286,7 @@ void main(){
 })";
 static GLuint g_progVeh = 0;
 
-static void vehDibujar(const float* vp, V3 cam, const float* sol, float solF, float skyMul, float hdr, const float* cielo, float fogA, float fogB, bool vidrio) {
-    Veh& v = g_veh;
+static void vehDibujarUno(Veh& v, const float* vp, V3 cam, const float* sol, float solF, float skyMul, float hdr, const float* cielo, float fogA, float fogB, bool vidrio) {
     if (!v.activo || v.celdas.empty()) return;
     V3 rel = v.p - cam;
     if (rel.x * rel.x + rel.y * rel.y + rel.z * rel.z > 700.0 * 700.0) return;
@@ -302,6 +314,10 @@ static void vehDibujar(const float* vp, V3 cam, const float* sol, float solF, fl
     } else if (v.vidrio.n) {
         glBindVertexArray(v.vidrio.vao); glDrawArrays(GL_TRIANGLES, 0, v.vidrio.n);
     }
+}
+
+static void vehDibujar(const float* vp, V3 cam, const float* sol, float solF, float skyMul, float hdr, const float* cielo, float fogA, float fogB, bool vidrio) {
+    vehDibujarUno(g_veh, vp, cam, sol, solF, skyMul, hdr, cielo, fogA, fogB, vidrio);
 }
 
 // ---------------------------------------------------------------- guardado

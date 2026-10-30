@@ -31,6 +31,7 @@ static std::string g_chatBuf;
 
 #include <unordered_map>
 #include <unordered_set>
+#include <array>
 #include <random>
 #include <algorithm>
 #include <deque>
@@ -236,6 +237,9 @@ static void juntarColumnas(const Chunk& c, SnapColumnas& sn) {
     }
 }
 
+static bool g_lodOnAntes = false;                    // v59: mundo lejano que tenias antes de ir a la Luna
+static bool g_jRespOk = false; static double g_jResp[3] = {0, 0, 0};   // v59: donde volver a aparecer en la Tierra si sales del juego en pleno viaje
+static std::string g_dirTierra;
 // ---------------------------------------------------------------- guardado en disco
 // Solo se guardan los chunks que cambiaste. Carpeta: mundo_SUB<N>/ (junto al juego). Formato: cabecera + datos comprimidos (RLE).
 static std::string g_dir = "mundos/mundo_1";        // carpeta del mundo elegido (se fija en el menu de mundos)
@@ -452,6 +456,53 @@ static uint8_t leerCubito(int vx, int vy, int vz, bool* conocido = nullptr) {
 // columnas (x, z de chunk) que tienen algun chunk editado: se siguen dibujando con chunks reales aunque queden lejos
 static inline int64_t colKey(int cx, int cz) { return ((int64_t)(cx + 1048576) << 21) | (int64_t)(cz + 1048576); }
 static inline void colDec(int64_t k, int& cx, int& cz) { cx = (int)(k >> 21) - 1048576; cz = (int)(k & 0x1FFFFF) - 1048576; }
+
+// ---- superficie REAL (con tus cambios) de una columna de chunks: altura minima (en bloques) del suelo solido mas alto
+// Sirve para no dibujar (ni en imagen ni en sombras) lo que queda enterrado bajo ella: cuevas y minas de columnas editadas.
+// Devuelve -1e9 si la columna no esta completa (no se oculta nada).
+struct SupCol { float minH; uint32_t firma; double t; };
+static std::unordered_map<int64_t, SupCol> g_supCache;
+static double supAhora() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+static float supMinColumna(int cx, int cz) {
+    ChunkP cs[HYC];
+    uint32_t firma = 17;
+    for (int cy = 0; cy < HYC; cy++) {
+        cs[cy] = buscar(cx, cy, cz);
+        if (!cs[cy] || cs[cy]->state.load(std::memory_order_acquire) < ST_READY) return -1e9f;
+        firma = firma * 31u + cs[cy]->version.load(std::memory_order_relaxed) + 1u;
+    }
+    const int64_t k = colKey(cx, cz);
+    const double now = supAhora();
+    auto it = g_supCache.find(k);
+    if (it != g_supCache.end() && (now - it->second.t < 0.5 || it->second.firma == firma)) { it->second.t = now; return it->second.minH; }
+    int mn = 1 << 30;
+    for (int lz = 2; lz < CS; lz += 4) for (int lx = 2; lx < CS; lx += 4) {
+        int top = -1;
+        for (int cy = HYC - 1; cy >= 0 && top < 0; cy--) {
+            const DatosChunk& d = cs[cy]->dat;
+            if (!d.d) { if (d.uni != AIRE && esSolido(d.uni) && !esHoja(d.uni)) top = cy * CS + CS - 1; continue; }
+            for (int ly = CS - 1; ly >= 0; ly--) {
+                uint8_t t = (*d.d)[IDX(lx, ly, lz)];
+                if (t != AIRE && esSolido(t) && !esHoja(t)) { top = cy * CS + ly; break; }
+            }
+        }
+        mn = std::min(mn, top + 1);
+    }
+    float h = (float)mn / SUB;
+    if (g_supCache.size() > 4000) g_supCache.clear();
+    g_supCache[k] = {h, firma, now};
+    return h;
+}
+// minimo en la columna y sus 8 vecinas: un chunk por debajo de eso no se asoma al exterior por ningun lado
+static float supMin3(int cx, int cz) {
+    float m = 1e9f;
+    for (int dz = -1; dz <= 1; dz++) for (int dx = -1; dx <= 1; dx++) {
+        float h = supMinColumna(cx + dx, cz + dz);
+        if (h < -1e8f) return -1e9f;
+        m = std::min(m, h);
+    }
+    return m;
+}
 static std::unordered_set<int64_t> g_editCols;
 static int g_ocluidosN = 0;           // chunks no dibujados por oclusion (para el titulo)
 static int g_hilos = 4;
@@ -523,6 +574,9 @@ static void remallarAsync(const ChunkP& c) {
     else if (st == ST_MESHING) c->version++;
 }
 
+static bool g_pedirCohete = false;      // comando /cohete del chat: construye un cohete de dos etapas delante de ti
+static bool g_pedirCiudad = false;      // F9: prueba de rendimiento (ciudad de luces), ver construirCiudad()
+
 // Un tick de agua. Reglas (como Minecraft, pero por cubitos): la fuente (AGUA) nunca cambia; el agua que fluye tiene nivel 1..8.
 //  - si hay agua encima: nivel 8 (cae);  - si no: el mayor nivel vecino - 1 (el vecino solo reparte de lado si no puede caer, o es fuente);
 //  - sin nada que la alimente, se seca.
@@ -572,6 +626,15 @@ static bool g_graf = false;         // celular: sin sombras ni efectos de pantal
 static bool g_graf = true;
 #endif      // graficos mejorados: sombras de sol, oclusion ambiental, bloom, FXAA, tonemapping
 static bool g_pausa = false;
+static int g_pausaSub = 0;          // 0 = pausa normal, 1 = ajustes de graficos
+static int g_cielo = 1;             // cielo con atmosfera (0 simple, 1 mejorado)
+static int g_viento = 1;            // hojas y plantas se mueven con el viento
+static int g_nubes = 2;             // 0 apagadas, 1 simples (cajas), 2 volumetricas (necesita graficos ON)
+#ifdef MOVIL
+static int g_agua = 0;              // 0 simple, 1 mejorada, 2 mejorada con olas
+#else
+static int g_agua = 2;
+#endif
 static bool g_anclaOn = true;          // mantener dibujadas las zonas editadas lejanas
 static const int LOD_N = 32, LOD_NIV = 3;
 static const int LOD_CELDA[LOD_NIV] = {2, 4, 8};
@@ -658,6 +721,8 @@ static void lodGenerar(LodTile& t, MascaraP mask) {
             else if (sup == ARENA) { cr = 0.86f; cg = 0.80f; cb = 0.55f; }
             else if (sup == NIEVE) { cr = 0.93f; cg = 0.95f; cb = 0.99f; }
             else if (sup == PASTO_SECO) { cr = 0.66f; cg = 0.60f; cb = 0.30f; }
+            else if (sup == HIELO_COMPACTO) { cr = 0.40f; cg = 0.62f; cb = 0.93f; }
+            else if (sup == GRAVA) { cr = 0.50f; cg = 0.48f; cb = 0.45f; }
             else {
                 cr = 0.34f; cg = 0.64f; cb = 0.21f;
                 float m = std::min(0.6f, std::max(0.0f, (1.0f - ny) * 1.4f));       // laderas empinadas: se ve la tierra de los escalones
@@ -673,18 +738,26 @@ static void lodGenerar(LodTile& t, MascaraP mask) {
     std::vector<uint16_t>& IW = t.ix[1];
     for (int j = 0; j < N; j++)
         for (int i = 0; i < N; i++) {
-            if (enMascara(bx0 + (i + 0.5) * cel, bz0 + (j + 0.5) * cel)) continue;      // ahi dibujan los chunks reales (con tus cambios)
+            const bool enMasc = enMascara(bx0 + (i + 0.5) * cel, bz0 + (j + 0.5) * cel);      // ahi dibujan los chunks reales (con tus cambios): sin terreno lejano, pero el AGUA lejana si (tapa el fondo oscuro)
             uint16_t a = (uint16_t)(j * (N + 1) + i), b = (uint16_t)(a + 1), d = (uint16_t)(a + N + 1), c = (uint16_t)(d + 1);
             float ha = h(i, j), hb = h(i + 1, j), hc = h(i + 1, j + 1), hd = h(i, j + 1);
-            if (std::fabs(ha - hc) < std::fabs(hb - hd)) { uint16_t q[6] = {a, d, c, a, c, b}; I.insert(I.end(), q, q + 6); }
-            else { uint16_t q[6] = {a, d, b, d, c, b}; I.insert(I.end(), q, q + 6); }
+            if (!enMasc) {
+                if (std::fabs(ha - hc) < std::fabs(hb - hd)) { uint16_t q[6] = {a, d, c, a, c, b}; I.insert(I.end(), q, q + 6); }
+                else { uint16_t q[6] = {a, d, b, d, c, b}; I.insert(I.end(), q, q + 6); }
+            }
             if (std::min(std::min(ha, hb), std::min(hc, hd)) < WATER_LEVEL - 0.01f) {
                 uint16_t base = (uint16_t)(W.size() / 6);
+                float wr = 0.18f, wg = 0.38f, wb = 0.80f;     // agua helada (tundra, mundo helado, mar polar): color de hielo
+                {
+                    double cxw = bx0 + (i + 0.5) * cel, czw = bz0 + (j + 0.5) * cel;
+                    int dm = biomaDominante(cxw, czw);
+                    if (dm == BIO_TUNDRA || dm == BIO_GLACIAR || (dm == BIO_OCEANO && temp01(cxw, czw) < 0.2f)) { wr = 0.62f; wg = 0.80f; wb = 0.96f; }
+                }
                 float xs[4] = {(float)(i * cel), (float)(i * cel), (float)((i + 1) * cel), (float)((i + 1) * cel)};
                 float zs[4] = {(float)(j * cel), (float)((j + 1) * cel), (float)((j + 1) * cel), (float)(j * cel)};
                 for (int k = 0; k < 4; k++) {
                     W.push_back(xs[k]); W.push_back((float)WATER_LEVEL); W.push_back(zs[k]);
-                    W.push_back(0.18f); W.push_back(0.38f); W.push_back(0.80f);
+                    W.push_back(wr); W.push_back(wg); W.push_back(wb);
                 }
                 uint16_t q[6] = {base, (uint16_t)(base + 1), (uint16_t)(base + 2), base, (uint16_t)(base + 2), (uint16_t)(base + 3)};
                 IW.insert(IW.end(), q, q + 6);
@@ -712,9 +785,19 @@ static void lodGenerar(LodTile& t, MascaraP mask) {
         }
     };
     for (const Arbol& a : arboles) {
-        static const float LC[8][3] = {{0.20f, 0.52f, 0.16f}, {0.78f, 0.13f, 0.10f}, {0.93f, 0.47f, 0.08f}, {0.94f, 0.80f, 0.13f},
-                                       {0.98f, 0.64f, 0.78f}, {0.09f, 0.33f, 0.19f}, {0.20f, 0.52f, 0.16f}, {0.25f, 0.55f, 0.25f}};
+        static const float LC[12][3] = {{0.20f, 0.52f, 0.16f}, {0.78f, 0.13f, 0.10f}, {0.93f, 0.47f, 0.08f}, {0.94f, 0.80f, 0.13f},
+                                        {0.98f, 0.64f, 0.78f}, {0.09f, 0.33f, 0.19f}, {0.20f, 0.52f, 0.16f}, {0.25f, 0.55f, 0.25f},
+                                        {0.07f, 0.40f, 0.12f}, {0.55f, 0.68f, 0.62f}, {0.56f, 0.74f, 0.26f}, {0.16f, 0.42f, 0.14f}};
         const float* lc = LC[a.k];
+        if (a.k == 8) {   // selva: tronco ancho y copa enorme
+            const double H = altSelva((int)std::floor(a.x), (int)std::floor(a.z));
+            caja(a.x - 0.5, a.base, a.z - 0.5, a.x + 1.5, a.base + H, a.z + 1.5, 0.36f, 0.22f, 0.14f);
+            caja(a.x - 3.4, a.base + H - 3.0, a.z - 3.4, a.x + 4.4, a.base + H + 1.6, a.z + 4.4, lc[0], lc[1], lc[2]);
+            continue;
+        }
+        if (a.k == 10) { if (t.niv == 0) caja(a.x - 0.25, a.base, a.z - 0.25, a.x + 0.25, a.base + 7.0, a.z + 0.25, lc[0], lc[1], lc[2]); continue; }
+        if (a.k == 11) { if (t.niv == 0) caja(a.x - 0.5, a.base + 1.0, a.z - 0.5, a.x + 0.5, a.base + 2.5, a.z + 0.5, lc[0], lc[1], lc[2]); continue; }
+        if (a.k == 9) { if (t.niv == 0) caja(a.x - 0.5, a.base, a.z - 0.5, a.x + 0.5, a.base + 6.0, a.z + 0.5, 0.40f, 0.28f, 0.15f); caja(a.x - 1.6, a.base + 2.0, a.z - 1.6, a.x + 1.6, a.base + 9.0, a.z + 1.6, lc[0], lc[1], lc[2]); continue; }
         if (a.k == 7) { caja(a.x - 0.5, a.base, a.z - 0.5, a.x + 0.5, a.base + 3.5, a.z + 0.5, lc[0], lc[1], lc[2]); continue; }
         if (t.niv == 0) caja(a.x - 0.5, a.base, a.z - 0.5, a.x + 0.5, a.base + (a.k == 5 ? 6.0 : 4.0), a.z + 0.5, 0.40f, 0.28f, 0.15f);
         if (a.k == 5) caja(a.x - 1.6, a.base + 2.0, a.z - 1.6, a.x + 1.6, a.base + 9.0, a.z + 1.6, lc[0], lc[1], lc[2]);
@@ -914,19 +997,25 @@ static void escanearEditados() {
         if (std::sscanf(fn.c_str(), "c_%d_%d_%d.bin", &x, &y, &z) == 3) g_editCols.insert(colKey(x, z));
     }
 }
+static bool g_nuevoProf = false;   // al crear un mundo nuevo: con mares profundos (opcional; por defecto NO)
+static bool g_espAtard = false;    // ajuste: mostrar la franja naranja del atardecer tambien desde el espacio (por defecto NO)
 static void guardarOpciones() {
     FILE* f = std::fopen("opciones.txt", "w");
     if (!f) return;
-    std::fprintf(f, "mundo_lejano=%d\ncambios_lejanos=%d\ngraficos=%d\nrendimiento=%d\nconservar=%d\n", g_lodOn ? 1 : 0, g_anclaOn ? 1 : 0, g_graf ? 1 : 0, g_perf, g_conservar ? 1 : 0);
+    std::fprintf(f, "mundo_lejano=%d\ncambios_lejanos=%d\ngraficos=%d\nrendimiento=%d\nconservar=%d\nnubes=%d\nagua=%d\ncielo=%d\nviento=%d\nmares_profundos=%d\natardecer_espacio=%d\n", (g_modoLuna ? g_lodOnAntes : g_lodOn) ? 1 : 0, g_anclaOn ? 1 : 0, g_graf ? 1 : 0, g_perf, g_conservar ? 1 : 0, g_nubes, g_agua, g_cielo, g_viento, g_nuevoProf ? 1 : 0, g_espAtard ? 1 : 0);
     std::fclose(f);
 }
 static void cargarOpciones() {
     FILE* f = std::fopen("opciones.txt", "r");
     if (!f) return;
-    int v = 1, w = 1, g = 1, pf = 0, cs = 0;
-    int nl = std::fscanf(f, "mundo_lejano=%d cambios_lejanos=%d graficos=%d rendimiento=%d conservar=%d", &v, &w, &g, &pf, &cs);
+    int v = 1, w = 1, g = 1, pf = 0, cs = 0, nb = g_nubes, ag = g_agua, ci = g_cielo, vi = g_viento, mp = 0, ae = 0;
+    int nl = std::fscanf(f, "mundo_lejano=%d cambios_lejanos=%d graficos=%d rendimiento=%d conservar=%d nubes=%d agua=%d cielo=%d viento=%d mares_profundos=%d atardecer_espacio=%d", &v, &w, &g, &pf, &cs, &nb, &ag, &ci, &vi, &mp, &ae);
     if (nl >= 1) { g_lodOn = v != 0; g_anclaOn = w != 0; g_graf = g != 0; }
     if (nl >= 5) { g_perf = std::max(0, std::min(2, pf)); g_conservar = cs != 0; }
+    if (nl >= 7) { g_nubes = std::max(0, std::min(2, nb)); g_agua = std::max(0, std::min(2, ag)); }
+    if (nl >= 9) { g_cielo = ci != 0; g_viento = vi != 0; }
+    if (nl >= 10) g_nuevoProf = mp != 0;
+    if (nl >= 11) g_espAtard = ae != 0;
     std::fclose(f);
 }
 
@@ -984,6 +1073,14 @@ static bool g_pincelBloque = false;
 static bool g_destruir = false;      // herramienta actual: destruir (en vez de poner un material)
 static bool g_menu = false;          // menu de materiales abierto (tecla E)
 static double g_hora = 0.12;         // hora del dia (0..1)
+// ---- clima: 0 despejado, 1 nublado, 2 lluvia, 3 tormenta, 4 niebla (cambia solo cada 80-240 s; tecla K lo cambia a mano)
+static int g_climaE = 0; static bool g_climaFijo = false; static double g_climaT = 90.0;
+static float g_clN = 0, g_clP = 0, g_clT = 0, g_clF = 0, g_clNieve = 0, g_clCub = 0;     // nubosidad, precipitacion, tormenta, niebla, nieve (en vez de lluvia), techo encima
+static double g_rayoT = -100, g_rayoSig = 8; static std::vector<float> g_rayoPts;
+static uint32_t g_climaRng = 0x9E3779B9u;
+static float climaRand() { g_climaRng = g_climaRng * 1664525u + 1013904223u; return (float)(g_climaRng >> 8) / 16777216.0f; }
+static inline float hf(uint32_t n) { n ^= n >> 16; n *= 0x7feb352dU; n ^= n >> 15; n *= 0x846ca68bU; n ^= n >> 16; return (float)(n & 0xFFFFFF) / 16777216.0f; }
+static inline float fmodPos(double a, double m) { double r = std::fmod(a, m); if (r < 0) r += m; return (float)r; }
 static double g_ultEspacio = -10;    // para el doble toque de Espacio (volar)
 static int g_winW = 1280, g_winH = 720, g_fbW = 1280, g_fbH = 720;
 // herramientas / materiales: el numero es el Tipo (0 = destruir)
@@ -996,7 +1093,9 @@ static const char* NOMBRES_SLOT[NTIPOS] = {"DESTRUIR", "PASTO", "TIERRA", "PIEDR
                                            "VIDRIO", "CARROCERIA", "ASIENTO", "TIMON", "ALA", "RUEDA", "HELICE", "CONTROL",
                                            "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA",
                                            "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA",
-                                           "NIEVE", "HIELO", "CACTUS", "HOJAS ROJAS", "HOJAS NARANJA", "HOJAS AMARILLAS", "HOJAS ROSAS", "PINO", "PASTO SECO"};
+                                           "NIEVE", "HIELO", "CACTUS", "HOJAS ROJAS", "HOJAS NARANJA", "HOJAS AMARILLAS", "HOJAS ROSAS", "PINO", "PASTO SECO",
+                                           "MADERA SELVA", "HOJAS SELVA", "LIANA", "BAMBU", "HOJAS NEVADAS", "ARBUSTO BAYAS", "FLOR ROJA", "FLOR AMARILLA", "FLOR AZUL", "FLOR ROSA", "HIELO COMPACTO", "LAVA",
+                                           "CORAL ROJO", "CORAL ROSA", "CORAL NARANJA", "CORAL MORADO", "CORAL AMARILLO", "CORAL AZUL", "ALGA", "GRAVA", "TNT", "TNT ENCENDIDO"};
 // ---- herramientas (ids 230..241) y modo survival
 static const int HERR_BASE = 230, HERR_N = 12;
 static inline bool esHerr(int id) { return id >= HERR_BASE && id < HERR_BASE + HERR_N; }
@@ -1007,6 +1106,7 @@ static const char* NOMBRES_HERR[HERR_N] = {"PICO MADERA", "PICO PIEDRA", "PICO H
                                            "PALA MADERA", "PALA PIEDRA", "PALA HIERRO", "PALA DIAMANTE"};
 static const char* nombreSlot(int t) {
     if (t == ID_SPRAY) return "SPRAY";
+    if (t == ID_POLVORA) return "POLVORA";
     if (esHerr(t)) return NOMBRES_HERR[t - HERR_BASE];
     return (t >= 0 && t < NTIPOS) ? NOMBRES_SLOT[t] : "";
 }
@@ -1016,7 +1116,7 @@ static float g_vida = 20.0f;                            // 20 = 10 corazones
 static double g_vidaT = 0, g_danoFlash = -10, g_caidaMax = 0, g_spawnS[3] = {0, 0, 0};
 static double g_protT = 0;                              // sin dano de caida hasta este instante (tras reaparecer)
 static int g_pagina = 0;                                // en el menu survival: 0 objetos, 1 recetas
-struct Receta { int out, n, a, na, b, nb; };
+struct Receta { int out, n, a, na, b, nb, c, nc; };
 static const std::vector<Receta>& recetas() {
     static std::vector<Receta> r;
     if (r.empty()) {
@@ -1025,26 +1125,28 @@ static const std::vector<Receta>& recetas() {
         const int mat[4] = {MADERA, PIEDRA, HIERRO, DIAMANTE};
         for (int ti = 0; ti < 3; ti++) for (int nv = 0; nv < 4; nv++) {
             const int* c = ti == 2 ? cp[nv] : cm[nv];
-            if (nv == 0) r.push_back({HERR_BASE + ti * 4, 1, MADERA, c[0], 0, 0});
-            else r.push_back({HERR_BASE + ti * 4 + nv, 1, MADERA, c[0], mat[nv], c[1]});
+            if (nv == 0) r.push_back({HERR_BASE + ti * 4, 1, MADERA, c[0], 0, 0, 0, 0});
+            else r.push_back({HERR_BASE + ti * 4 + nv, 1, MADERA, c[0], mat[nv], c[1], 0, 0});
         }
-        r.push_back({ANTORCHA, 4, MADERA, 2, CARBON, 1});
-        r.push_back({VIDRIO, 4, ARENA, 8, 0, 0});
-        r.push_back({CARROCERIA, 8, HIERRO, 8, 0, 0});
-        r.push_back({ASIENTO, 4, MADERA, 8, HIERRO, 4});
-        r.push_back({TIMON, 1, HIERRO, 8, 0, 0});
-        r.push_back({ALA, 8, ALUMINIO, 8, 0, 0});
-        r.push_back({RUEDA, 8, CARBON, 8, HIERRO, 4});
-        r.push_back({HELICE, 4, ALUMINIO, 8, 0, 0});
-        r.push_back({CONTROL, 1, COBRE, 4, HIERRO, 4});
-        r.push_back({ID_SPRAY, 1, ALUMINIO, 8, CARBON, 4});
+        r.push_back({ANTORCHA, 4, MADERA, 2, CARBON, 1, 0, 0});
+        r.push_back({VIDRIO, 4, ARENA, 8, 0, 0, 0, 0});
+        r.push_back({CARROCERIA, 8, HIERRO, 8, 0, 0, 0, 0});
+        r.push_back({ASIENTO, 4, MADERA, 8, HIERRO, 4, 0, 0});
+        r.push_back({TIMON, 1, HIERRO, 8, 0, 0, 0, 0});
+        r.push_back({ALA, 8, ALUMINIO, 8, 0, 0, 0, 0});
+        r.push_back({RUEDA, 8, CARBON, 8, HIERRO, 4, 0, 0});
+        r.push_back({HELICE, 4, ALUMINIO, 8, 0, 0, 0, 0});
+        r.push_back({CONTROL, 1, COBRE, 4, HIERRO, 4, 0, 0});
+        r.push_back({ID_SPRAY, 1, ALUMINIO, 8, CARBON, 4, 0, 0});
+        r.push_back({ID_POLVORA, 2, SALITRE, 3, CARBON, 1, AZUFRE, 1});     // v51: 3 salitre + 1 carbon + 1 azufre = 2 polvora
+        r.push_back({TNT, 8, ID_POLVORA, 4, 0, 0, 0, 0});                 // 4 polvoras = 1 bloque de TNT (8 cubitos)
     }
     return r;
 }
-static bool puedeCraftear(const Receta& r) { return g_inv[r.a] >= r.na && (r.nb == 0 || g_inv[r.b] >= r.nb); }
+static bool puedeCraftear(const Receta& r) { return g_inv[r.a] >= r.na && (r.nb == 0 || g_inv[r.b] >= r.nb) && (r.nc == 0 || g_inv[r.c] >= r.nc); }
 static int survClase(int tp) {   // 0 pala, 1 hacha, 2 pico, 3 sin herramienta
-    if (tp == PASTO || tp == TIERRA || tp == ARENA || tp == ARCILLA || tp == NIEVE || tp == PASTO_SECO) return 0;
-    if (tp == MADERA || esHoja(tp) || tp == CACTUS) return 1;
+    if (tp == PASTO || tp == TIERRA || tp == ARENA || tp == ARCILLA || tp == NIEVE || tp == PASTO_SECO || tp == GRAVA) return 0;
+    if (tp == MADERA || esHoja(tp) || tp == CACTUS || tp == MADERA_SELVA || tp == BAMBU || tp == ARBUSTO_BAYAS || tp == LIANA) return 1;
     if (tp == HIELO) return 2;
     if (tp == PIEDRA || (tp >= CARBON && tp <= URANIO && tp != ARCILLA && tp != ANTORCHA) || tp == AZUFRE || tp == SALITRE) return 2;
     return 3;
@@ -1064,6 +1166,7 @@ static bool survPicoOK(int tp, int mat) {
 static int survDrop(int tp) {
     if (tp == AIRE || (tp >= AGUA && tp <= AGUA) || (tp >= AGUA_F1 && tp <= AGUA_F8)) return -1;
     if (tp >= CARR_0 && tp <= CARR_11) return CARROCERIA;
+    if (tp == TNT_ENC) return TNT;
     return tp;
 }
 static double survCooldown(int tp, int mat) {   // segundos entre cubitos picados
@@ -1075,6 +1178,129 @@ static double survCooldown(int tp, int mat) {   // segundos entre cubitos picado
     return std::max(0.05, 0.18 * dur / vel);
 }
 static void survDano(float hp) { g_vida -= hp; g_danoFlash = glfwGetTime(); }
+// ---------------------------------------------------------------- mapa de la Tierra vista desde el espacio (v54)
+// Se calcula en un hilo aparte con las mismas funciones que genera el terreno (oceanos, biomas, hielo), alrededor del jugador,
+// y el cielo lo pega sobre la esfera: asi el planeta que ves arriba ES tu mundo.
+static const int MAPA_N = 256;
+static const double MAPA_SPAN = 24000.0;
+static std::vector<uint8_t> g_mapaBuf;
+static std::atomic<int> g_mapaEstado{0};          // 0 libre, 1 calculando, 2 listo para subir
+static double g_mapaCx = 0, g_mapaCz = 0, g_mapaPCx = 0, g_mapaPCz = 0;
+static bool g_mapaTiene = false;
+static float g_mapaOk = 0.0f;
+static void mapaCalcular(double cx, double cz, uint32_t semilla) {
+    (void)semilla;
+    static const float BC[BIO_N][3] = {{0.30f, 0.55f, 0.20f}, {0.15f, 0.40f, 0.15f}, {0.10f, 0.32f, 0.12f}, {0.80f, 0.70f, 0.45f}, {0.70f, 0.35f, 0.18f}, {0.25f, 0.38f, 0.22f},
+                                       {0.85f, 0.90f, 0.95f}, {0.60f, 0.58f, 0.25f}, {0.65f, 0.40f, 0.15f}, {0.85f, 0.87f, 0.90f}, {0.85f, 0.55f, 0.65f}, {0.60f, 0.38f, 0.25f},
+                                       {0.06f, 0.35f, 0.10f}, {0.12f, 0.30f, 0.22f}, {0.40f, 0.60f, 0.30f}, {0.92f, 0.96f, 1.00f}, {0.85f, 0.80f, 0.60f}, {0.05f, 0.25f, 0.45f}};
+    std::vector<uint8_t> px((size_t)MAPA_N * MAPA_N * 4);
+    for (int j = 0; j < MAPA_N; j++) for (int i = 0; i < MAPA_N; i++) {
+        double x = cx + ((i + 0.5) / MAPA_N - 0.5) * MAPA_SPAN, z = cz + ((j + 0.5) / MAPA_N - 0.5) * MAPA_SPAN;
+        float w[BIO_N]; int dom = biomaPesos(x, z, w);
+        float c[3];
+        if (dom == BIO_OCEANO) {
+            float u = std::max(0.0f, -continental(x, z)), pr = std::min(1.0f, u / 0.17f);
+            if (temp01(x, z) < 0.2f) { c[0] = 0.78f; c[1] = 0.88f; c[2] = 0.95f; }                       // mar polar
+            else { c[0] = 0.10f + (0.02f - 0.10f) * pr; c[1] = 0.48f + (0.10f - 0.48f) * pr; c[2] = 0.62f + (0.30f - 0.62f) * pr; }
+        } else { c[0] = BC[dom][0]; c[1] = BC[dom][1]; c[2] = BC[dom][2]; }
+        uint8_t* o = &px[((size_t)j * MAPA_N + i) * 4];
+        for (int k = 0; k < 3; k++) o[k] = (uint8_t)std::max(0.0f, std::min(255.0f, c[k] * 255.0f));
+        o[3] = 255;
+    }
+    g_mapaBuf = std::move(px);
+    g_mapaCx = cx; g_mapaCz = cz;                       // (el hilo principal solo lo lee cuando el estado es 2)
+    g_mapaEstado.store(2);
+}
+
+// ---------------------------------------------------------------- TNT (v51)
+// Se enciende con una antorcha (clic en el TNT). Todo el bloque de TNT conectado parpadea ~3 s y explota: crater esférico,
+// el TNT vecino se enciende en cadena, y en survival te hace daño y te empuja.
+struct TntFusible { std::vector<std::array<int, 3>> celdas; double t0, dur; bool blanco; };
+static std::vector<TntFusible> g_tnt;
+static std::unordered_set<int64_t> g_tntEnc;      // celdas que ya estan encendidas
+struct Explosion { double x, y, z, t0, R; };
+static std::vector<Explosion> g_explos;
+static double g_explDestello = -100, g_explFuerza = 0;
+static inline int64_t tntClave(int x, int y, int z) { return ((int64_t)(x + 1048576) << 42) | ((int64_t)(y + 1048576) << 21) | (int64_t)(z + 1048576); }
+static inline bool esTnt(uint8_t t) { return t == TNT || t == TNT_ENC; }
+static void tntEncender(int x, int y, int z, double ahora, double dur) {
+    if (!esTnt(leerCubito(x, y, z)) || g_tntEnc.count(tntClave(x, y, z))) return;
+    TntFusible f; f.t0 = ahora; f.dur = dur; f.blanco = false;
+    std::vector<std::array<int, 3>> cola; cola.push_back({x, y, z});
+    g_tntEnc.insert(tntClave(x, y, z));
+    static const int D[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (size_t i = 0; i < cola.size() && cola.size() < 60000; i++) {
+        auto c = cola[i];
+        f.celdas.push_back(c);
+        for (auto& d : D) {
+            int nx = c[0] + d[0], ny = c[1] + d[1], nz = c[2] + d[2];
+            if (!esTnt(leerCubito(nx, ny, nz)) || g_tntEnc.count(tntClave(nx, ny, nz))) continue;
+            g_tntEnc.insert(tntClave(nx, ny, nz)); cola.push_back({nx, ny, nz});
+        }
+    }
+    g_tnt.push_back(std::move(f));
+}
+static void tntExplotar(const TntFusible& f, double ahora) {
+    std::vector<ChunkP> su;
+    double mx = 0, my = 0, mz = 0;
+    for (auto& c : f.celdas) { mx += c[0]; my += c[1]; mz += c[2]; }
+    const double n = (double)f.celdas.size();
+    mx /= n; my /= n; mz /= n;
+    for (auto& c : f.celdas) g_tntEnc.erase(tntClave(c[0], c[1], c[2]));
+    const double bloques = n / (double)(SUB * SUB * SUB);
+    const double R = std::min(12.0, 3.2 + 1.3 * std::cbrt(std::max(1.0, bloques)));      // radio en bloques (1 TNT = 4.5)
+    const double Rc = R * SUB;
+    const bool envio = g_redEnviar; g_redEnviar = true;                                     // la explosion tambien se manda por la red
+    for (auto& c : f.celdas) escribirCubito(c[0], c[1], c[2], AIRE, su);
+    const int r = (int)std::ceil(Rc * 1.15) + 1;
+    const int cx = (int)std::floor(mx), cy = (int)std::floor(my), cz = (int)std::floor(mz);
+    std::vector<std::array<int, 3>> encadenar;
+    for (int dy = -r; dy <= r; dy++) for (int dz = -r; dz <= r; dz++) for (int dx = -r; dx <= r; dx++) {
+        double d2 = (double)dx * dx + (double)dy * dy + (double)dz * dz;
+        if (d2 > (Rc * 1.15) * (Rc * 1.15)) continue;
+        int x = cx + dx, y = cy + dy, z = cz + dz;
+        double lim = Rc * (0.84 + 0.30 * hf((uint32_t)(x * 73856093) ^ (uint32_t)(y * 19349663) ^ (uint32_t)(z * 83492791)));   // borde irregular
+        if (d2 > lim * lim) continue;
+        uint8_t t = leerCubito(x, y, z);
+        if (t == AIRE || t == LAVA) continue;
+        if (esTnt(t)) { encadenar.push_back({x, y, z}); continue; }
+        if (!esAgua(t)) escribirCubito(x, y, z, AIRE, su);
+    }
+    g_redEnviar = envio;
+    for (auto& c : su) remallarYa(c);
+    marcarLuzSucia(cx - r - SUB, cx + r + SUB, cy - r - SUB, cy + r + SUB, cz - r - SUB, cz + r + SUB, su);
+    for (auto& c : encadenar) tntEncender(c[0], c[1], c[2], ahora, 0.35 + 0.9 * hf((uint32_t)(c[0] * 31 + c[2] * 17 + c[1])));
+    const double ex = (mx + 0.5) * VS, ey = (my + 0.5) * VS, ez = (mz + 0.5) * VS;
+    g_explos.push_back({ex, ey, ez, ahora, R});
+    // jugador: empuje y dano segun la distancia
+    double dx = g_j.p.x - ex, dy = (g_j.p.y + 0.9) - ey, dz = g_j.p.z - ez, d = std::sqrt(dx * dx + dy * dy + dz * dz);
+    const double alc = R * 2.0;
+    if (d < alc) {
+        double k = 1.0 - d / alc;
+        if (d < 0.01) { dx = 0; dy = 1; dz = 0; d = 1; }
+        double imp = k * 22.0;
+        g_j.inercia.x += dx / d * imp * 0.7; g_j.inercia.z += dz / d * imp * 0.7; g_j.v.y += dy / d * imp * 0.5 + k * 8.0;
+        g_j.suelo = false;
+        if (g_survival) survDano((float)(k * k * 34.0));
+        g_caidaMax = g_j.p.y;       // la caida despues de la explosion no hace dano extra
+    }
+    g_explDestello = ahora; g_explFuerza = (float)std::max(0.15, 1.0 - d / (alc * 2.5));
+}
+static void tntActualizar(double ahora) {
+    for (size_t i = 0; i < g_tnt.size();) {
+        TntFusible& f = g_tnt[i];
+        double edad = ahora - f.t0;
+        if (edad >= f.dur) { TntFusible c = std::move(f); g_tnt.erase(g_tnt.begin() + i); tntExplotar(c, ahora); continue; }
+        bool bl = ((int)(edad / 0.25) & 1) != 0;
+        if (bl != f.blanco) {
+            f.blanco = bl;
+            std::vector<ChunkP> su;
+            for (auto& c : f.celdas) if (esTnt(leerCubito(c[0], c[1], c[2]))) escribirCubito(c[0], c[1], c[2], bl ? TNT_ENC : TNT, su);
+            for (auto& c : su) remallarYa(c);
+        }
+        i++;
+    }
+}
 static const int VACIO = -1;                                                                  // casilla vacia (mano libre: solo rompe)
 static int g_barra[9] = {0, PASTO, TIERRA, PIEDRA, ARENA, MADERA, HOJAS, CARBON, ANTORCHA};   // barra de 9 casillas
 static int g_mano = -100, g_manoOrigen = -1;      // objeto agarrado en el menu (-100 = nada) y de que casilla de la barra vino (-1 = del menu)
@@ -1095,7 +1321,7 @@ static void cargarBarra() {
     for (int i = 0; i < 9 && ok; i++) ok = std::fscanf(f, "%d", &v[i]) == 1;
     std::fclose(f);
     if (!ok) return;
-    for (int i = 0; i < 9; i++) if (v[i] == VACIO || v[i] == ID_SPRAY || (v[i] >= 0 && v[i] < NTIPOS)) g_barra[i] = v[i];
+    for (int i = 0; i < 9; i++) if (v[i] == VACIO || v[i] == ID_SPRAY || v[i] == ID_POLVORA || (v[i] >= 0 && v[i] < NTIPOS)) g_barra[i] = v[i];
     aplicarSel();
 }
 static std::string archivoSurv() { return g_dir + "/survival.txt"; }
@@ -1125,7 +1351,7 @@ static void guardarJugador() {
     std::filesystem::create_directories(g_dir, ec);
     FILE* f = std::fopen(archivoJugador().c_str(), "w");
     if (!f) return;
-    std::fprintf(f, "%.4f %.4f %.4f %.5f %.5f %d %d %d\n", g_j.p.x, g_j.p.y, g_j.p.z, g_j.yaw, g_j.pitch,
+    std::fprintf(f, "%.4f %.4f %.4f %.5f %.5f %d %d %d\n", g_jRespOk ? g_jResp[0] : g_j.p.x, g_jRespOk ? g_jResp[1] : g_j.p.y, g_jRespOk ? g_jResp[2] : g_j.p.z, g_j.yaw, g_j.pitch,
                  g_j.volar ? 1 : 0, g_material, g_pincelBloque ? 1 : 0);
     std::fclose(f);
 }
@@ -1180,6 +1406,8 @@ uniform mat4 uVP;
 uniform vec3 uRel;      // origen del chunk menos la camara
 uniform vec3 uAbs;      // origen absoluto del chunk
 uniform float uVS;
+uniform float uTime;
+uniform float uViento;
 out vec3 vAbs;
 out float vDist;
 flat out vec3 vInfo;
@@ -1192,6 +1420,14 @@ void main(){
     vDist = length(rel);
     vRel = rel;
     vInfo = aInfo.xyz;
+    int tp = int(aInfo.x + 0.5);
+    if (uViento > 0.5 && (tp == 7 || (tp >= 67 && tp <= 71) || tp == 74 || (tp >= 75 && tp <= 82 && tp != 76) || tp == 76)) {
+        float amp = (tp == 75) ? 0.09 : (tp >= 79 && tp <= 82) ? 0.06 : (tp == 76) ? 0.035 : 0.05;   // hojas y plantas se mecen con el viento
+        vec3 wp = vAbs;
+        float r1 = sin(wp.x * 0.11 + wp.z * 0.08 + uTime * 0.9) * 0.6 + sin(wp.x * 0.37 - wp.z * 0.29 + uTime * 1.9) * 0.4;
+        float r2 = sin(wp.z * 0.13 - wp.x * 0.07 + uTime * 0.8) * 0.6 + sin(wp.x * 0.31 + wp.z * 0.41 + uTime * 2.3) * 0.4;
+        rel += vec3(r1, 0.35 * sin(wp.x * 0.9 + wp.z * 0.7 + uTime * 2.6), r2 * 0.7) * amp * (0.6 + 0.4 * r1);
+    }
     gl_Position = uVP * vec4(rel, 1.0);
 })";
 
@@ -1218,8 +1454,17 @@ uniform float uSub;
 uniform vec3 uSky;
 uniform float uFogA;
 uniform float uFogB;
+uniform float uTime;
+uniform float uAguaFx;
+uniform float uBuceo;
 const vec3 NRM[6] = vec3[6](vec3(1,0,0), vec3(-1,0,0), vec3(0,1,0), vec3(0,-1,0), vec3(0,0,1), vec3(0,0,-1));
 float hash(vec3 p){ p = fract(p * 0.1031); p += dot(p, p.yzx + 33.33); return fract((p.x + p.y) * p.z); }
+float vnA(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(vec3(i, 1.0)), hash(vec3(i + vec2(1.0, 0.0), 1.0)), f.x), mix(hash(vec3(i + vec2(0.0, 1.0), 1.0)), hash(vec3(i + vec2(1.0, 1.0), 1.0)), f.x), f.y); }
+float olaH(vec2 p, float t, float foot){   // altura de las olas; cada capa se apaga cuando es mas fina que un pixel (foot = tamano del pixel en el mundo): evita el centelleo
+    float a1 = 1.0 - smoothstep(0.15, 0.45, foot * 0.9), a2 = 1.0 - smoothstep(0.15, 0.45, foot * 2.2), a3 = 1.0 - smoothstep(0.15, 0.45, foot * 5.3);
+    return mix(0.5, vnA(p * 0.9 + vec2(t * 0.30, t * 0.18)), a1) * 0.55 + mix(0.5, vnA(p * 2.2 - vec2(t * 0.45, -t * 0.27)), a2) * 0.30 + mix(0.5, vnA(p * 5.3 + vec2(t * 0.85, t * 0.6)), a3) * 0.15;
+}
 const vec3 LEDC[12] = vec3[12](vec3(1.0,0.10,0.10), vec3(1.0,0.48,0.08), vec3(1.0,0.90,0.15), vec3(0.60,1.0,0.12), vec3(0.10,1.0,0.20), vec3(0.08,1.0,0.80),
                                vec3(0.15,0.70,1.0), vec3(0.15,0.20,1.0), vec3(0.55,0.18,1.0), vec3(1.0,0.15,0.80), vec3(1.0,0.50,0.72), vec3(1.0,1.0,1.0));
 const vec3 CARRC[12] = vec3[12](vec3(0.80,0.12,0.12), vec3(0.95,0.45,0.08), vec3(0.95,0.85,0.15), vec3(0.55,0.80,0.15), vec3(0.12,0.62,0.22), vec3(0.10,0.65,0.62),
@@ -1248,12 +1493,12 @@ void main(){
     int tipo = int(vInfo.x + 0.5);
     int cara = int(vInfo.y + 0.5);
     vec3 n = NRM[cara];
-    vec3 col; float alfa = 1.0;
+    vec3 col; float alfa = 1.0; float lumi = 1.0;
     if (tipo == 1) col = (cara == 2) ? vec3(0.34,0.64,0.21) : vec3(0.45,0.32,0.20);
     else if (tipo == 2) col = vec3(0.45,0.32,0.20);
     else if (tipo == 3) col = vec3(0.50,0.50,0.52);
     else if (tipo == 4) col = vec3(0.86,0.80,0.55);
-    else if (tipo == 5) { col = vec3(0.18,0.38,0.80); alfa = 0.65; }
+    else if (tipo == 5) { if (uAguaFx < 0.5) { col = vec3(0.18,0.38,0.80); alfa = 0.65; } else { col = vec3(0.07,0.34,0.55); alfa = 0.70; } }
     else if (tipo == 6) col = vec3(0.40,0.28,0.15);
     else if (tipo == 7) col = vec3(0.20,0.52,0.16);
     else if (tipo == 14) col = vec3(0.62,0.64,0.72);
@@ -1275,7 +1520,99 @@ void main(){
         else if (tipo == 69) col = vec3(0.94,0.80,0.13);                  // hojas amarillas
         else if (tipo == 70) col = vec3(0.98,0.64,0.78);                  // hojas rosas (cerezo)
         else if (tipo == 71) col = vec3(0.09,0.33,0.19);                  // pino
-        else col = (cara == 2) ? vec3(0.66,0.60,0.30) : vec3(0.45,0.32,0.20);   // pasto seco
+        else if (tipo == 72) col = (cara == 2) ? vec3(0.66,0.60,0.30) : vec3(0.45,0.32,0.20);   // pasto seco
+        else if (tipo == 73) col = vec3(0.36,0.22,0.14);                  // madera de selva
+        else if (tipo == 74) col = vec3(0.07,0.40,0.12);                  // hojas de selva
+        else if (tipo == 75) {                                            // liana: tira fina
+            vec3 fr = fract((vAbs - n * 0.002) * uSub);
+            vec2 q = abs(n.y) > 0.5 ? fr.xz : (abs(n.x) > 0.5 ? fr.zy : fr.xy);
+            if (abs(q.x - 0.5) > 0.13 || (abs(n.y) > 0.5 && abs(q.y - 0.5) > 0.13)) discard;
+            col = vec3(0.14,0.45,0.13);
+        }
+        else if (tipo == 76) {                                            // bambu con nudos
+            col = vec3(0.56,0.74,0.26);
+            if (fract((vAbs.y - n.y * 0.002) * uSub * 0.5) < 0.18) col = vec3(0.34,0.50,0.14);
+        }
+        else if (tipo == 77) {                                            // hojas con nieve
+            col = vec3(0.92,0.95,0.97);
+            if (hash(floor((vAbs - n * 0.002) * uSub * 2.0) + 7.0) > 0.62) col = vec3(0.10,0.34,0.20);
+        }
+        else if (tipo == 78) {                                            // arbusto de bayas
+            col = vec3(0.16,0.42,0.14);
+            if (hash(floor((vAbs - n * 0.002) * uSub * 2.0) + 11.0) > 0.78) col = vec3(0.82,0.10,0.18);
+        }
+        else if (tipo <= 82) {                                            // flores: tallo y cabeza (objetos delgados)
+            vec3 fr = fract((vAbs - n * 0.002) * uSub);
+            bool arriba = abs(n.y) > 0.5;
+            vec2 q = arriba ? fr.xz : (abs(n.x) > 0.5 ? fr.zy : fr.xy);
+            float dx = abs(q.x - 0.5);
+            bool cabeza = arriba ? (dx < 0.34 && abs(q.y - 0.5) < 0.34) : (q.y > 0.5 && dx < 0.34);
+            bool tallo = !arriba && q.y <= 0.5 && dx < 0.09;
+            if (!cabeza && !tallo) discard;
+            if (tallo) col = vec3(0.20,0.52,0.16);
+            else if (tipo == 79) col = vec3(0.90,0.12,0.12);
+            else if (tipo == 80) col = vec3(0.98,0.85,0.12);
+            else if (tipo == 81) col = vec3(0.22,0.35,0.95);
+            else col = vec3(0.98,0.45,0.75);
+        }
+        else if (tipo == 83) col = vec3(0.40,0.62,0.93);                  // hielo compacto (azul grueso)
+        else if (tipo >= 85 && tipo <= 90) {                              // corales: bloques vivos con poros y cerebros
+            vec3 cb = vec3(0.92,0.20,0.22);
+            if (tipo == 86) cb = vec3(0.98,0.46,0.70);
+            else if (tipo == 87) cb = vec3(0.98,0.52,0.14);
+            else if (tipo == 88) cb = vec3(0.62,0.28,0.88);
+            else if (tipo == 89) cb = vec3(0.98,0.84,0.18);
+            else if (tipo == 90) cb = vec3(0.20,0.50,0.95);
+            vec3 pc = (vAbs - n * 0.002) * uSub;
+            float c1 = hash(floor(pc * 2.0) + 5.0);
+            float c2 = hash(floor(pc * 4.0) + 9.0);
+            col = cb * (0.78 + 0.40 * c1);
+            if (c2 > 0.84) col *= 0.50;                                     // poros oscuros
+            else if (c2 < 0.10) col = mix(col, vec3(1.0), 0.28);            // puntas claras
+        }
+        else if (tipo == 91) {                                            // alga: hoja fina que se mece con la corriente
+            vec3 fr = fract((vAbs - n * 0.002) * uSub);
+            bool arriba = abs(n.y) > 0.5;
+            if (arriba) discard;
+            vec2 q = abs(n.x) > 0.5 ? fr.zy : fr.xy;
+            float sway = 0.12 * sin(uTime * 1.6 + vAbs.y * 2.4 + floor(vAbs.x * uSub) * 1.7 + floor(vAbs.z * uSub) * 1.1);
+            if (abs(q.x - 0.5 + sway) > 0.26) discard;
+            col = mix(vec3(0.06,0.34,0.13), vec3(0.22,0.62,0.24), clamp(q.y, 0.0, 1.0));
+        }
+        else if (tipo == 92) {                                            // grava: guijarros grises y pardos
+            vec3 pg = (vAbs - n * 0.002) * uSub;
+            float g1 = hash(floor(pg * 2.0) + 13.0);
+            col = mix(vec3(0.42,0.41,0.40), vec3(0.62,0.58,0.52), g1);
+            if (hash(floor(pg * 4.0) + 21.0) > 0.80) col *= 0.70;
+        }
+        else if (tipo == 93 || tipo == 94) {                              // TNT: cuerpo rojo, franja blanca con letras; 94 = encendido (blanco)
+            vec3 fr = fract((vAbs - n * 0.002));
+            if (abs(n.y) > 0.5) {
+                float r = length(fr.xz - 0.5);
+                col = mix(vec3(0.78,0.70,0.55), vec3(0.45,0.40,0.32), smoothstep(0.10, 0.14, r) * (1.0 - smoothstep(0.17, 0.21, r)));
+                if (r < 0.06) col = vec3(0.20,0.18,0.15);
+            } else {
+                float u = abs(n.x) > 0.5 ? fr.z : fr.x;
+                col = vec3(0.80,0.12,0.10) * (0.92 + 0.08 * hash(floor(fr * 8.0) + 3.0));
+                if (fr.y > 0.28 && fr.y < 0.72) {
+                    col = vec3(0.93,0.92,0.88);
+                    float v = (fr.y - 0.28) / 0.44;
+                    bool L = false;
+                    if ((u > 0.08 && u < 0.30 && v > 0.78) || (u > 0.16 && u < 0.22)) L = true;
+                    if ((u > 0.38 && u < 0.43) || (u > 0.55 && u < 0.60) || (u > 0.38 && u < 0.60 && abs(u - 0.38 - (1.0 - v) * 0.22) < 0.035)) L = true;
+                    if ((u > 0.68 && u < 0.90 && v > 0.78) || (u > 0.76 && u < 0.82)) L = true;
+                    if (L) col = vec3(0.12,0.10,0.10);
+                }
+            }
+            if (tipo == 94) col = mix(col, vec3(1.0,0.97,0.9), 0.82);
+        }
+        else {                                                            // lava: manchas que se mueven despacio, del rojo oscuro al amarillo
+            vec2 lp = abs(n.y) > 0.5 ? vAbs.xz : (abs(n.x) > 0.5 ? vAbs.zy : vAbs.xy);
+            float l1 = vnA(lp * 1.4 + vec2(uTime * 0.05, -uTime * 0.035));
+            float l2 = vnA(lp * 3.6 - vec2(uTime * 0.09, uTime * 0.07));
+            float lv = clamp(l1 * 0.75 + l2 * 0.55 - 0.15, 0.0, 1.0);
+            col = mix(vec3(0.46,0.05,0.0), vec3(1.0,0.66,0.10), lv * lv * 1.2);
+        }
     }
     else if (tipo >= 52) col = CARRC[tipo - 52];
     else if (tipo >= 32) col = LEDC[tipo - 32];
@@ -1301,9 +1638,11 @@ void main(){
     // textura "de pixeles" barata: variacion por cubito y por cuarto de cubito (no rompe el fusionado de caras)
     vec3 p = vAbs - n * 0.002;
     float r = (hash(floor(p * uSub)) - 0.5) * 0.16 + (hash(floor(p * uSub * 4.0) + 7.0) - 0.5) * 0.07;
-    col *= 1.0 + r;
+    col *= 1.0 + r * ((tipo == 5 && uAguaFx > 0.5) ? 0.0 : 1.0);
     if (tipo >= 32 && tipo < 44) {
         col *= mix(1.1, 1.9, uHDR);       // los LED brillan por si solos
+    } else if (tipo == 84) {
+        col *= mix(1.25, 2.4, uHDR);      // la lava brilla por si sola
     } else if (tipo == 21) {
         col *= mix(1.15, 2.0, uHDR);      // la antorcha brilla por si sola
     } else {
@@ -1314,9 +1653,11 @@ void main(){
         vec3 lcol = lz.gba * 255.0 / uLMax;                                // luz de bloque en rojo, verde y azul
         float bloque = max(lcol.r, max(lcol.g, lcol.b));
         float nivel = clamp(max(cielo, bloque), 0.0, 1.0);
+        if (uBuceo > 0.5) nivel = max(nivel, 0.9 * uSkyMul);       // buceando: el agua no oscurece con la profundidad
         float br = 0.045 + 0.955 * exp(-3.35 * (1.0 - nivel));
         float cara_s = (cara == 2) ? 1.0 : ((cara == 3) ? 0.5 : ((cara < 2) ? 0.62 : 0.80));
         col *= br * cara_s;
+        lumi = br * cara_s;
         if (uSombraOn > 0.5) {
             float sm = sombraSol(n);
             float ndl2 = max(dot(n, uSolDir), 0.0);
@@ -1327,6 +1668,54 @@ void main(){
         }
         vec3 tono = bloque > 0.001 ? lcol / bloque : vec3(1.0);                             // color de la luz de bloque
         col *= mix(vec3(1.0), min(tono * 1.15, vec3(1.3)), clamp((bloque - cielo) * 1.4, 0.0, 1.0));   // antorcha calida o LED de color
+    }
+    float foot = length(fwidth(vAbs.xz));          // tamano de un pixel sobre el agua (crece con la distancia y con el angulo rasante)
+    if (tipo == 5 && uAguaFx > 0.5 && cara == 2 && vRel.y > 0.0) {   // la superficie vista desde abajo (buceando): sin brillos ni espuma
+        col = mix(vec3(0.10, 0.42, 0.62) * max(lumi, 0.20), uSky * 0.45, 0.30);
+        alfa = 0.82;
+    } else if (tipo == 5 && uAguaFx > 0.5) {   // agua estilo Photon: olas animadas, reflejo del cielo (Fresnel), brillo del sol y color profundo
+        vec3 V = normalize(vRel);
+        vec3 nw = n;
+        if (cara == 2 && uAguaFx > 1.5) {
+            vec2 pw = vAbs.xz; float e = 0.12;
+            float h0 = olaH(pw, uTime, foot);
+            vec2 g = vec2(olaH(pw + vec2(e, 0.0), uTime, foot) - h0, olaH(pw + vec2(0.0, e), uTime, foot) - h0) / e;
+            float amp = 0.55 * smoothstep(0.04, 0.32, -V.y) * (1.0 - smoothstep(180.0, 520.0, vDist));   // de lado y a lo lejos el agua se alisa
+            nw = normalize(vec3(-g.x * amp, 1.0, -g.y * amp));
+        }
+        float cv = clamp(dot(-V, nw), 0.0, 1.0);
+        float fres = 0.03 + 0.97 * pow(1.0 - cv, 5.0);
+        vec3 R = reflect(V, nw);
+        float up = clamp(R.y, 0.0, 1.0);
+        float dia = clamp(uSkyMul, 0.0, 1.0);
+        vec3 cenit = vec3(0.20, 0.42, 0.88) * (0.10 + 0.90 * dia);
+        vec3 refl = mix(uSky, cenit, pow(up, 0.55));
+        float luzA = max(dot(col, vec3(0.33)), 0.0);
+        vec3 prof = col;                                                   // color del agua ya iluminado (se oscurece en cuevas y de noche)
+        float dB = 12.0, esp = 1.0;                                        // profundidad en bloques (solo la superficie la trae)
+        if (cara == 2) {
+            float rz = vnA(vAbs.xz * 1.7 + vec2(uTime * 0.2, -uTime * 0.15));
+            dB = vInfo.z + (rz - 0.5) * 1.3 + 0.35;                         // el ruido suaviza los escalones de 1 bloque
+            float tp = clamp(dB / 11.0, 0.0, 1.0);
+            vec3 somero = vec3(0.17, 0.60, 0.62), hondo = vec3(0.015, 0.11, 0.30);
+            prof *= mix(somero, hondo, pow(tp, 0.55)) / vec3(0.07, 0.34, 0.55);       // turquesa en lo somero, azul oscuro en lo hondo
+            prof *= mix(1.0, 0.45, smoothstep(14.0, 31.0, dB));                       // mar profundo: casi negro
+            esp = smoothstep(0.0, 5.0, dB);
+        }
+        prof *= 1.0 + 0.30 * (olaH(vAbs.xz * 0.6, uTime * 0.5, foot * 0.6) - 0.5);       // manchas
+        col = mix(prof, refl * (0.25 + 0.75 * clamp(luzA * 6.0, 0.0, 1.0)), fres * 0.80);
+        float sp = pow(max(dot(R, uSolDir), 0.0), mix(220.0, 45.0, clamp(foot * 2.5, 0.0, 1.0))) * uSolF;
+        col += vec3(1.0, 0.93, 0.78) * sp * (1.5 + 3.0 * uHDR);
+        col += vec3(1.0, 0.93, 0.78) * pow(max(dot(R, uSolDir), 0.0), 12.0) * 0.12 * uSolF;   // resplandor ancho
+        alfa = clamp(mix(mix(0.30, 0.94, esp), 0.97, fres) + sp, 0.0, 1.0);        // somero = transparente, hondo = opaco
+        if (cara == 2) {   // espuma en la orilla (donde el agua es muy somera)
+            float cerca = 1.0 - smoothstep(0.0, 1.5, dB);
+            float rz2 = vnA(vAbs.xz * 3.6 + vec2(uTime * 0.30, -uTime * 0.22)) * 0.6 + mix(vnA(vAbs.xz * 8.0 - vec2(uTime * 0.4, uTime * 0.3)), 0.5, smoothstep(0.15, 0.45, foot * 8.0)) * 0.4;
+            float onda = 0.5 + 0.5 * sin(uTime * 1.6 - dB * 2.6 + rz2 * 5.0);          // la espuma va y viene
+            float fo = clamp(cerca * smoothstep(0.38, 0.62, rz2 + 0.35 * cerca + 0.22 * onda), 0.0, 1.0);
+            col = mix(col, vec3(0.95, 0.98, 1.0) * max(lumi, 0.07) * (1.0 + 0.2 * uHDR), fo);
+            alfa = max(alfa, fo);
+        }
     }
     float f = clamp((vDist - uFogA) / (uFogB - uFogA), 0.0, 1.0);
     frag = vec4(mix(col, uSky, f), alfa);
@@ -1370,6 +1759,19 @@ uniform vec4 uColor;
 out vec4 frag;
 void main(){ frag = uColor; })";
 
+// ---- clima: lluvia, nieve y rayos (cuadrilateros con alfa por vertice)
+static const char* VW_SRC = R"(#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in float aA;
+uniform mat4 uVP;
+out float vA;
+void main(){ vA = aA; gl_Position = uVP * vec4(aPos, 1.0); })";
+static const char* FW_SRC = R"(#version 330 core
+uniform vec4 uColor;
+in float vA;
+out vec4 frag;
+void main(){ frag = vec4(uColor.rgb, uColor.a * vA); })";
+
 // ---- cielo: degradado, estrellas, sol y luna (un triangulo a pantalla completa, se dibuja antes del mundo)
 static const char* VC_SRC = R"(#version 330 core
 void main(){
@@ -1383,36 +1785,163 @@ uniform vec3 uFwd, uRight, uUp;
 uniform vec2 uTan;
 uniform vec3 uHor, uZen, uSun;
 uniform float uNoche;
+uniform float uTime;
+uniform float uMejor;
+uniform float uClima;
+uniform float uAlt;
+uniform vec3 uHaze;
+uniform vec2 uCamXZ;
+uniform float uEsp;
+uniform float uAtmoF;
+uniform sampler2D uMapa;
+uniform vec2 uMapaOff;
+uniform float uMapaOk;
+uniform vec3 uOc;
+uniform vec3 uLunaC;
+uniform float uLunaR;
+uniform float uLunaOn;
 float hash(vec3 p){ p = fract(p * 0.1031); p += dot(p, p.yzx + 33.33); return fract((p.x + p.y) * p.z); }
+float vn3(vec3 p){
+    vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+    float a = mix(mix(hash(i), hash(i + vec3(1,0,0)), f.x), mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y);
+    float b = mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x), mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y);
+    return mix(a, b, f.z);
+}
+float crater(vec3 n, float sc, float sd){      // crateres sobre la esfera de la Luna (celdas 3D)
+    vec3 p = n * sc, i = floor(p);
+    float v = 0.0;
+    for (int x = -1; x <= 1; x++) for (int y = -1; y <= 1; y++) for (int z = -1; z <= 1; z++) {
+        vec3 g = i + vec3(float(x), float(y), float(z));
+        if (hash(g + sd) < 0.45) continue;
+        vec3 c = g + vec3(hash(g + sd + 1.7), hash(g + sd + 3.1), hash(g + sd + 5.3));
+        float r = 0.22 + 0.22 * hash(g + sd + 7.9);
+        float dd = length(p - c) / r;
+        if (dd < 1.15) v += -(1.0 - smoothstep(0.0, 0.85, dd)) * 0.9 + smoothstep(0.75, 0.95, dd) * (1.0 - smoothstep(0.95, 1.15, dd)) * 0.55;
+    }
+    return v;
+}
 void main(){
+    float tTierra = 1e30;
     vec2 nd = gl_FragCoord.xy / uRes * 2.0 - 1.0;
     vec3 d = normalize(uFwd + nd.x * uTan.x * uRight + nd.y * uTan.y * uUp);
     vec3 col = d.y > 0.0 ? mix(uHor, uZen, pow(d.y, 0.55)) : uHor;
-    if (uNoche > 0.01 && d.y > 0.02) {                       // estrellas
-        vec3 c = floor(d * 150.0);
-        float s = hash(c);
-        if (s > 0.9965) col += vec3(1.0) * uNoche * (0.45 + 0.55 * hash(c + 3.0));
+    float ds = dot(d, uSun);
+    if (uMejor > 0.5) {   // cielo con atmosfera: neblina en el horizonte, dispersion alrededor del sol y colores de atardecer
+        float elev = uSun.y;
+        float luzSol = smoothstep(-0.14, 0.10, elev);
+        float ocaso = exp(-pow(elev / 0.24, 2.0)) * uAtmoF;
+        float yy = clamp(d.y, 0.0, 1.0);
+        float hor = pow(1.0 - yy, 4.0) * uAtmoF;
+        vec2 az = normalize(d.xz + vec2(1e-5)), azS = normalize(uSun.xz + vec2(1e-5));
+        float haciaSol = 0.5 + 0.5 * dot(az, azS);
+        col = mix(uHor, uZen, pow(yy, 0.42));
+        col = mix(col, uHor * 1.08 + vec3(0.03, 0.04, 0.05) * luzSol, hor * 0.40 * luzSol);          // neblina clara
+        vec3 mie = mix(vec3(1.0, 0.86, 0.62), vec3(1.0, 0.42, 0.14), ocaso);
+        float cs = max(ds, 0.0);
+        col += mie * (pow(cs, 5.0) * 0.16 + pow(cs, 36.0) * 0.30) * luzSol * uAtmoF;                            // resplandor del sol
+        vec3 calido = mix(vec3(1.0, 0.48, 0.20), vec3(0.95, 0.32, 0.40), clamp(d.y * 2.5, 0.0, 1.0));
+        col = mix(col, calido, ocaso * haciaSol * pow(1.0 - yy, 1.6) * 0.62);                            // banda naranja hacia el sol
+        col = mix(col, vec3(0.34, 0.28, 0.55), ocaso * (1.0 - haciaSol) * pow(yy, 0.7) * 0.32);        // rosa y violeta al lado opuesto
     }
-    float ds = dot(d, uSun);                                 // sol: cuadrado como en Minecraft + brillo
-    if (ds > 0.0) {
+    if (uNoche > 0.01 && (d.y > 0.02 || uEsp > 0.02)) {      // estrellas (en el espacio tambien hacia abajo)
+        if (uMejor > 0.5) {
+            vec3 c = floor(d * 170.0);
+            float s = hash(c);
+            if (s > 0.9965) {
+                float tw = 0.72 + 0.28 * sin(uTime * 2.5 + hash(c + 1.0) * 30.0);
+                vec3 tinte = mix(vec3(0.80, 0.90, 1.0), vec3(1.0, 0.90, 0.75), hash(c + 7.0));
+                col += tinte * uNoche * (0.30 + 0.70 * hash(c + 3.0)) * tw * max(smoothstep(0.02, 0.25, d.y), uEsp);
+            }
+            vec3 ax = normalize(vec3(0.35, 0.75, 0.55));
+            float banda = exp(-pow(dot(d, ax) * 3.2, 2.0));
+            float nz = hash(floor(d * 55.0)) * 0.5 + hash(floor(d * 120.0) + 4.0) * 0.5;
+            col += vec3(0.10, 0.10, 0.19) * banda * nz * uNoche * max(smoothstep(0.0, 0.3, d.y), uEsp) * 0.7;    // via lactea tenue
+        } else {
+            vec3 c = floor(d * 150.0);
+            float s = hash(c);
+            if (s > 0.9965) col += vec3(1.0) * uNoche * (0.45 + 0.55 * hash(c + 3.0));
+        }
+    }
+    if (ds > 0.0) {                                          // sol: cuadrado como en Minecraft + brillo
         vec3 u = normalize(cross(vec3(0.0, 0.0, 1.0), uSun));
         vec3 v = cross(uSun, u);
         vec2 ab = vec2(dot(d, u), dot(d, v)) / ds;
-        if (abs(ab.x) < 0.12 && abs(ab.y) < 0.12) col = vec3(1.0, 0.96, 0.72);
-        col += vec3(1.0, 0.80, 0.45) * pow(ds, 90.0) * 0.55;
+        if (abs(ab.x) < 0.12 && abs(ab.y) < 0.12) col = mix(col, vec3(1.0, 0.96, 0.72), 1.0 - uClima);
+        col += vec3(1.0, 0.80, 0.45) * pow(ds, 90.0) * 0.55 * (1.0 - uClima);
     }
     float dm = dot(d, -uSun);                                // luna con craterls
-    if (dm > 0.0) {
+    float lf = 1.0 - uLunaOn;                                 // en el espacio la Luna es una esfera de verdad
+    if (dm > 0.0 && lf > 0.01) {
         vec3 u = normalize(cross(vec3(0.0, 0.0, 1.0), -uSun));
         vec3 v = cross(-uSun, u);
         vec2 ab = vec2(dot(d, u), dot(d, v)) / dm;
         if (abs(ab.x) < 0.09 && abs(ab.y) < 0.09) {
             vec2 cel = floor(ab / 0.03);
             float m = 0.80 + 0.14 * hash(vec3(cel, 5.0)) - (hash(vec3(cel, 9.0)) > 0.8 ? 0.16 : 0.0);
-            col = vec3(0.86, 0.90, 1.0) * m;
+            col = mix(col, vec3(0.86, 0.90, 1.0) * m, (1.0 - uClima) * lf);
         }
-        col += vec3(0.35, 0.42, 0.65) * pow(dm, 120.0) * 0.30;
+        col += vec3(0.35, 0.42, 0.65) * pow(dm, 120.0) * 0.30 * (1.0 - uClima) * lf;
+        if (uMejor > 0.5) col += vec3(0.30, 0.36, 0.60) * pow(max(dm, 0.0), 14.0) * 0.10 * uNoche * lf;   // halo de la luna
     }
+    if (uAlt > 150.0) {   // desde muy alto: la Tierra como una esfera enorme debajo (continentes, nubes, polos) con su halo de atmosfera
+        const float RP = 6000.0;
+        float pv = smoothstep(300.0, 1400.0, uAlt);
+        vec3 oc = uOc;
+        float bq = dot(oc, d);
+        float disc = bq * bq - (dot(oc, oc) - RP * RP);
+        vec3 haze = max(uHaze, vec3(0.025, 0.05, 0.12));
+        if (bq < 0.0) {
+            if (disc > 0.0) {
+                float t = -bq - sqrt(disc);
+                tTierra = t;
+                vec3 p = oc + d * t, n = normalize(p);
+                vec3 q = (p + vec3(uCamXZ.x, 0.0, uCamXZ.y)) / RP * 5.0;
+                float luz = clamp(dot(n, uSun) * 1.4 + 0.25, 0.0, 1.0);
+                float land = vn3(q) * 0.65 + vn3(q * 2.3) * 0.35;
+                vec3 surf = mix(vec3(0.03, 0.15, 0.42), vec3(0.17, 0.40, 0.15), smoothstep(0.50, 0.56, land));
+                surf = mix(surf, vec3(0.52, 0.44, 0.28), smoothstep(0.62, 0.70, land) * 0.75);
+                surf = mix(surf, vec3(0.92, 0.95, 1.0), smoothstep(0.80, 0.93, abs(n.x)));
+                {   // el mapa real de ESTE mundo (oceanos, biomas, hielo) bajo el jugador
+                    vec2 uv = (p.xz + uMapaOff) / 24000.0 + 0.5;
+                    float mb = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+                    float usa = smoothstep(0.0, 0.05, mb) * uMapaOk;
+                    vec3 mc = textureLod(uMapa, uv, 0.0).rgb * (0.88 + 0.24 * vn3(q * 9.0));
+                    surf = mix(surf, mc, usa);
+                }
+                float cl = vn3(q * 1.8 + 3.0) * 0.6 + vn3(q * 4.4) * 0.4;
+                surf = mix(surf, vec3(1.0), smoothstep(0.50, 0.68, cl) * 0.85);
+                float rim = pow(1.0 - clamp(dot(n, -d), 0.0, 1.0), 3.0);
+                vec3 pc = surf * luz + haze * rim * (0.35 + 0.65 * luz);
+                col = mix(col, pc, pv);
+            } else {
+                float dm = length(oc - d * bq) - RP;
+                vec3 pm = normalize(oc - d * bq);
+                float luz = clamp(dot(pm, uSun) * 1.4 + 0.25, 0.0, 1.0);
+                col += haze * exp(-max(dm, 0.0) / 120.0) * luz * 0.95 * pv;
+            }
+        }
+    }
+    if (uLunaR > 0.0 && uLunaOn > 0.01) {    // la Luna: esfera gris con crateres y mares oscuros
+        vec3 oc2 = -uLunaC;
+        float bq2 = dot(oc2, d);
+        float disc2 = bq2 * bq2 - (dot(oc2, oc2) - uLunaR * uLunaR);
+        if (bq2 < 0.0 && disc2 > 0.0) {
+            float t2 = -bq2 - sqrt(disc2);
+            if (t2 < tTierra) {
+                vec3 n2 = normalize(oc2 + d * t2);
+                float maria = vn3(n2 * 2.3 + 7.0) * 0.6 + vn3(n2 * 5.0) * 0.4;
+                vec3 alb = mix(vec3(0.74, 0.73, 0.71), vec3(0.33, 0.33, 0.36), smoothstep(0.52, 0.62, maria));
+                float cr = crater(n2, 12.0, 1.0) + 0.7 * crater(n2, 30.0, 11.0) + 0.5 * crater(n2, 80.0, 23.0);
+                alb *= clamp(1.0 + 0.42 * cr, 0.25, 1.5);
+                float lum = clamp(dot(n2, uSun) * 1.5 + 0.10, 0.0, 1.0);
+                vec3 dE = normalize(-uOc - (uLunaC + n2 * uLunaR));                  // hacia la Tierra: su luz ilumina el lado oscuro
+                float es = clamp(dot(n2, dE) * 0.8 + 0.2, 0.0, 1.0);
+                vec3 mc = alb * (lum + 0.16 * es) + vec3(0.010, 0.014, 0.025);
+                col = mix(col, mc, uLunaOn);
+            }
+        }
+    }
+    if (uMejor > 0.5) col += (hash(vec3(gl_FragCoord.xy, 1.0)) - 0.5) / 160.0;   // ruido fino contra las bandas de color
     frag = vec4(col, 1.0);
 })";
 
@@ -1441,6 +1970,81 @@ uniform float uA;
 void main(){
     float f = clamp((vDist - uFog.x) / (uFog.y - uFog.x), 0.0, 1.0);
     frag = vec4(mix(uCol * vSh, uSkyF, f), uA * (1.0 - f));
+})";
+
+// ---- nubes volumetricas (estilo Photon): un plano enorme; cada pixel avanza un rayo por la capa de nubes
+static const char* VN2_SRC = R"(#version 330 core
+uniform mat4 uVP;
+uniform float uR;
+uniform float uYm;
+out vec3 vRel;
+void main(){
+    vec2 c[6] = vec2[6](vec2(-1,-1), vec2(1,-1), vec2(1,1), vec2(-1,-1), vec2(1,1), vec2(-1,1));
+    vec2 q = c[gl_VertexID];
+    vRel = vec3(q.x * uR, uYm, q.y * uR);
+    gl_Position = uVP * vec4(vRel, 1.0);
+})";
+static const char* FN2_SRC = R"(#version 330 core
+in vec3 vRel;
+out vec4 frag;
+uniform vec3 uCamAbs;
+uniform vec2 uWind;
+uniform float uY0;
+uniform float uTh;
+uniform vec3 uSun;
+uniform vec3 uCol;
+uniform vec3 uSkyF;
+uniform vec2 uFog;
+uniform float uCover;
+float h3(vec3 p){ p = fract(p * 0.1031); p += dot(p, p.yzx + 33.33); return fract((p.x + p.y) * p.z); }
+float n3(vec3 x){
+    vec3 i = floor(x), f = fract(x); f = f * f * (3.0 - 2.0 * f);
+    float a = mix(mix(h3(i), h3(i + vec3(1,0,0)), f.x), mix(h3(i + vec3(0,1,0)), h3(i + vec3(1,1,0)), f.x), f.y);
+    float b = mix(mix(h3(i + vec3(0,0,1)), h3(i + vec3(1,0,1)), f.x), mix(h3(i + vec3(0,1,1)), h3(i + vec3(1,1,1)), f.x), f.y);
+    return mix(a, b, f.z);
+}
+float dens(vec3 w){   // w = (x, altura sobre la base de la capa, z), en bloques
+    float hh = w.y / uTh;
+    if (hh < -0.02 || hh > 1.4) return 0.0;
+    vec3 q = vec3(w.x * 0.010, w.y * 0.028, w.z * 0.010);
+    float n = 0.60 * n3(q) + 0.30 * n3(q * 2.3 + 7.1) + 0.10 * n3(q * 5.2 + 3.7);
+    float lim = uCover + 0.30 * hh * hh;
+    return smoothstep(lim, lim + 0.17, n) * smoothstep(0.0, 0.07, hh);
+}
+void main(){
+    vec3 dir = normalize(vRel);
+    if (abs(dir.y) < 0.003) discard;
+    float t0 = uY0 / dir.y, t1 = (uY0 + uTh) / dir.y;
+    float tn = max(min(t0, t1), 0.0), tf = max(t0, t1);
+    if (tf <= tn) discard;
+    tf = min(tf, tn + 700.0);
+    const int N = 12;
+    float dt = (tf - tn) / float(N);
+    tn += dt * h3(vec3(gl_FragCoord.xy, 5.0));
+    float T = 1.0; vec3 acc = vec3(0.0);
+    float cosS = max(dot(dir, uSun), 0.0);
+    for (int i = 0; i < N; i++) {
+        float t = tn + dt * float(i);
+        vec3 P = uCamAbs + dir * t;
+        vec3 w = vec3(P.x - uWind.x, P.y - (uCamAbs.y + uY0), P.z - uWind.y);
+        float d = dens(w);
+        if (d < 0.004) continue;
+        float ls = dens(w + uSun * 5.0) + dens(w + uSun * 12.0) * 0.8;
+        float luz = exp(-ls * 1.7);
+        float hh = clamp(w.y / uTh, 0.0, 1.0);
+        vec3 sombra = uCol * vec3(0.64, 0.70, 0.86) * (0.84 + 0.28 * hh);
+        vec3 sol = uCol * vec3(1.10, 1.06, 0.98) + uCol * pow(cosS, 10.0) * 0.45;
+        vec3 c = mix(sombra, sol, luz);
+        float a = 1.0 - exp(-d * dt * 0.085);
+        acc += T * a * c;
+        T *= 1.0 - a;
+        if (T < 0.02) break;
+    }
+    float alfa = 1.0 - T;
+    if (alfa < 0.003) discard;
+    vec3 col = acc / alfa;
+    float fg = clamp((tn - uFog.x) / (uFog.y - uFog.x), 0.0, 1.0);
+    frag = vec4(mix(col, uSkyF, fg), alfa * (1.0 - fg));
 })";
 
 static GLuint compilar(GLenum tipo, const char* src) {
@@ -1486,12 +2090,13 @@ constexpr bool SOLO_VISIBLE = true;      // celular: tambien sin mundo lejano se
 constexpr bool SOLO_VISIBLE = false;
 #endif
 #include "vehiculo.h"
+#include "cohete.h"
 #include "jugadores.h"
 
 
 // ---------------------------------------------------------------- mundos (menu que aparece al iniciar)
 struct InfoMundo { std::string carpeta, nombre; uint32_t semilla = 0; int chunks = 0; long long t = 0; };
-static const char* RAIZ_MUNDOS = "mundos";
+static const char* RAIZ_MUNDOS = SUB == 2 ? "mundos" : (SUB == 1 ? "mundos_sub1" : (SUB == 4 ? "mundos_sub4" : "mundos_sub8"));   // cada SUB guarda sus mundos aparte (no son compatibles)
 static std::vector<InfoMundo> g_mundos;
 static int g_pantalla = 1;                 // 0 = menu de mundos, 1 = juego
 static int g_mundoElegido = -1;
@@ -1555,6 +2160,7 @@ static InfoMundo crearMundo() {
     m.nombre = "MUNDO " + std::to_string(n);
     std::random_device rd;
     m.semilla = (rd() & 0xFFFFFF) | 1u;
+    if (g_nuevoProf) m.semilla |= (1u << 24);          // mares profundos: el bit 24 de la semilla
     fs::create_directories(m.carpeta, ec);
     escribirInfoMundo(m.carpeta, m.nombre, m.semilla);
     return m;
@@ -1579,7 +2185,8 @@ static MBase mundosBase(int fbw, int fbh) {
     b.vis = std::max(1, (int)((fbh - b.yLista - 44 * b.k) / (b.hFila + b.gap)));
     return b;
 }
-static MRect mRNuevo(const MBase& b) { return {b.x0, b.yNuevo, b.w, b.hFila}; }
+static MRect mRNuevo(const MBase& b) { return {b.x0, b.yNuevo, b.w * 0.60f, b.hFila}; }
+static MRect mRProf(const MBase& b) { return {b.x0 + b.w * 0.62f, b.yNuevo, b.w * 0.38f, b.hFila}; }
 static MRect mRFila(const MBase& b, int v) { return {b.x0, b.yLista + v * (b.hFila + b.gap), b.w, b.hFila}; }
 static MRect mRBorrar(const MBase& b, int v) { MRect r = mRFila(b, v); float bw = 150 * b.k; return {r.x + r.w - bw - 10 * b.k, r.y + 10 * b.k, bw, r.h - 20 * b.k}; }
 static MRect mRNo(const MBase& b, int v) { MRect r = mRFila(b, v); float bw = 110 * b.k; return {r.x + r.w - bw - 10 * b.k, r.y + 10 * b.k, bw, r.h - 20 * b.k}; }
@@ -1591,6 +2198,7 @@ static void mundosHit(double mx, double my, int& tipo, int& idx) {
     MBase b = mundosBase(g_fbW, g_fbH);
     tipo = -1; idx = -1;
     if (mDentro(mRNuevo(b), px, py)) { tipo = 0; return; }
+    if (mDentro(mRProf(b), px, py)) { tipo = 5; return; }
     for (int v = 0; v < b.vis; v++) {
         int gi = g_scrollM + v;
         if (gi >= (int)g_mundos.size()) break;
@@ -1634,13 +2242,23 @@ static MRect pausaRect(int fbw, int fbh, int i) {
     float k = std::max(0.8f, fbh / 720.0f), w = 420 * k, h = 44 * k, gap = 8 * k;
     return {(fbw - w) / 2.0f, fbh * 0.28f + i * (h + gap), w, h};
 }
+static MRect graficosRect(int fbw, int fbh) { MRect r = pausaRect(fbw, fbh, 3); float k = std::max(0.8f, fbh / 720.0f); r.w -= 128 * k; return r; }
+static MRect ajustesRect(int fbw, int fbh) { MRect r = pausaRect(fbw, fbh, 3); float k = std::max(0.8f, fbh / 720.0f); r.x += r.w - 120 * k; r.w = 120 * k; return r; }
 static int pausaHit(double mx, double my) {
     double px = mx * g_fbW / std::max(1, g_winW), py = my * g_fbH / std::max(1, g_winH);
+    if (g_pausaSub) { for (int i = 0; i < 7; i++) if (mDentro(pausaRect(g_fbW, g_fbH, i), px, py)) return i; return -1; }
+    if (mDentro(ajustesRect(g_fbW, g_fbH), px, py)) return 10;
+    if (mDentro(graficosRect(g_fbW, g_fbH), px, py)) return 3;
     for (int i = 0; i < 8; i++) if (mDentro(pausaRect(g_fbW, g_fbH, i), px, py)) return i;
     return -1;
 }
+static std::vector<int> g_menuItems;       // objetos que muestra el menu (creativo: todos; survival: los que tienes)
+static int g_menuPag = 0;                  // pagina actual del menu de materiales (5 filas x 10 columnas = 50 por pagina)
+static const int MENU_PAG = 50;
+static int menuPaginas() { return std::max(1, ((int)g_menuItems.size() + MENU_PAG - 1) / MENU_PAG); }
 static void alRueda(GLFWwindow*, double, double dy) {
     if (g_pantalla == 0) { g_scrollM += dy > 0 ? -1 : 1; mundosClamp(); return; }
+    if (g_menu && !g_pausa) { if (!(g_survival && g_pagina == 1)) { g_menuPag = std::max(0, std::min(menuPaginas() - 1, g_menuPag + (dy > 0 ? -1 : 1))); } return; }
     if (g_menu || g_pausa) return;
     g_sel = (g_sel + (dy > 0 ? 1 : -1) + 9) % 9;
     aplicarSel();
@@ -1656,30 +2274,36 @@ static void menuGeom(int fbw, int fbh, int i, float& x, float& y, float& s) {
     x = x0 + (i % 10) * (s + gap);
     y = y0 + (i / 10) * (s + gap + 18.0f * k);
 }
-static std::vector<int> g_menuItems;       // objetos que muestra el menu (creativo: todos; survival: los que tienes)
 static void menuReconstruir() {
     g_menuItems.clear();
     if (!g_survival) {
-        for (int i = 0; i < NTIPOS_MENU; i++) g_menuItems.push_back(menuTipo(i));
+        for (int i = 0; i < NTIPOS_MENU; i++) if (menuTipo(i) != TNT_ENC) g_menuItems.push_back(menuTipo(i));
         for (int t = 0; t < HERR_N; t++) g_menuItems.push_back(HERR_BASE + t);
     } else {
         for (int id = 1; id < 256; id++) if (g_inv[id] > 0 && !(id >= AGUA_F1 && id <= AGUA_F8) && id != AGUA) g_menuItems.push_back(id);
     }
+    g_menuPag = std::max(0, std::min(g_menuPag, menuPaginas() - 1));
 }
 static MRect recRect(int fbw, int fbh, int i) {   // recetas en dos columnas
-    float k = std::max(0.8f, fbh / 720.0f), w = 400 * k, gap = 20 * k, h = 37 * k;
+    float k = std::max(0.8f, fbh / 720.0f), w = 400 * k, gap = 20 * k, h = 34 * k;
     float x0 = (fbw - (2 * w + gap)) / 2.0f;
-    return {x0 + (i / 11) * (w + gap), fbh * 0.17f + (i % 11) * 42 * k, w, h};
+    return {x0 + (i / 13) * (w + gap), fbh * 0.17f + (i % 13) * 37 * k, w, h};
 }
 static MRect tabRect(int fbw, int fbh, int j) {
     float k = std::max(0.8f, fbh / 720.0f);
     return {fbw - (2 - j) * (138 * k) - 12 * k, 36 * k, 130 * k, 30 * k};
 }
+static MRect flechaRect(int fbw, int fbh, int dir) {   // dir 0 = izquierda, 1 = derecha (a los lados del titulo)
+    float k = std::max(0.8f, fbh / 720.0f), s = 44 * k;
+    return {dir == 0 ? fbw / 2.0f - 300 * k - s : fbw / 2.0f + 300 * k, fbh * 0.17f - 98 * k, s, s};
+}
 static int menuTileEn(double mx, double my) {
     double px = mx * g_fbW / std::max(1, g_winW), py = my * g_fbH / std::max(1, g_winH);
-    for (int i = 0; i < (int)g_menuItems.size(); i++) {
+    for (int j = 0; j < MENU_PAG; j++) {
+        int i = g_menuPag * MENU_PAG + j;
+        if (i >= (int)g_menuItems.size()) break;
         float x, y, sz;
-        menuGeom(g_fbW, g_fbH, i, x, y, sz);
+        menuGeom(g_fbW, g_fbH, j, x, y, sz);
         if (px >= x && px <= x + sz && py >= y && py <= y + sz) return g_menuItems[i];
     }
     return -1;
@@ -1713,7 +2337,7 @@ static void survCraftear(int idx) {
     if (idx < 0 || idx >= (int)R.size()) return;
     const Receta& r = R[idx];
     if (!puedeCraftear(r)) { g_aviso = "TE FALTAN MATERIALES"; g_avisoT = glfwGetTime(); return; }
-    g_inv[r.a] -= r.na; if (r.nb) g_inv[r.b] -= r.nb;
+    g_inv[r.a] -= r.na; if (r.nb) g_inv[r.b] -= r.nb; if (r.nc) g_inv[r.c] -= r.nc;
     g_inv[r.out] = std::min(9999, g_inv[r.out] + r.n);
     g_aviso = std::string("FABRICADO: ") + nombreSlot(r.out); g_avisoT = glfwGetTime();
     guardarSurv();
@@ -1735,7 +2359,16 @@ static void alChar(GLFWwindow*, unsigned int cp) {
 static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
     if (g_chat && (accion == GLFW_PRESS || accion == GLFW_REPEAT)) {      // escribiendo un mensaje
         if (tecla == GLFW_KEY_ESCAPE) g_chat = false;
-        else if (tecla == GLFW_KEY_ENTER || tecla == GLFW_KEY_KP_ENTER) { if (!g_chatBuf.empty()) g_red.chatEnviar(g_chatBuf); g_chatBuf.clear(); g_chat = false; }
+        else if (tecla == GLFW_KEY_ENTER || tecla == GLFW_KEY_KP_ENTER) {
+            if (!g_chatBuf.empty()) {
+                std::string cm = g_chatBuf; for (auto& ch : cm) ch = (char)std::tolower((unsigned char)ch);
+                if (cm == "/cohete") g_pedirCohete = true;
+                if (cm == "/luna") g_lunaPend = true;       // (prueba) ir directo al mundo de la Luna
+                else if (cm[0] == '/') { g_aviso = "COMANDO DESCONOCIDO. COMANDOS: /COHETE"; g_avisoT = glfwGetTime(); }
+                else if (g_red.activo()) g_red.chatEnviar(g_chatBuf);
+            }
+            g_chatBuf.clear(); g_chat = false;
+        }
         else if (tecla == GLFW_KEY_BACKSPACE && !g_chatBuf.empty()) g_chatBuf.pop_back();
         return;
     }
@@ -1743,17 +2376,30 @@ static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
     if (g_pantalla == 0) {
         if (tecla == GLFW_KEY_ESCAPE) { if (g_confBorrar >= 0) g_confBorrar = -1; else glfwSetWindowShouldClose(w, 1); }
         else if (tecla == GLFW_KEY_N) g_crearNuevo = true;
+        else if (tecla == GLFW_KEY_P) { g_nuevoProf = !g_nuevoProf; guardarOpciones(); }
         else if ((tecla == GLFW_KEY_ENTER || tecla == GLFW_KEY_KP_ENTER) && !g_mundos.empty() && g_confBorrar < 0) g_mundoElegido = 0;
         return;
     }
     if (tecla == GLFW_KEY_ESCAPE) {
         if (g_menu) cerrarMenu(w);
-        else if (g_pausa) reanudar(w);
+        else if (g_pausa) { if (g_pausaSub) g_pausaSub = 0; else reanudar(w); }
         else abrirPausa(w);
         return;
     }
     if (g_pausa) return;
-    if (tecla == GLFW_KEY_ENTER && g_red.activo() && !g_menu) { g_chat = true; g_chatBuf.clear(); return; }     // abrir el chat
+    if (tecla == GLFW_KEY_ENTER && !g_menu) { g_chat = true; g_chatBuf.clear(); return; }     // abrir el chat
+    if (g_ck.activo) {      // volando en el cohete
+        if (tecla == GLFW_KEY_G) ckSalir();
+        else if (tecla == GLFW_KEY_TAB) {
+            g_ck.cab = !g_ck.cab;
+            V3 f_, r_, u_; vehBase(g_ck.e2, f_, r_, u_);
+            g_j.yaw = g_ck.cab ? 0.0 : std::atan2(f_.x, -f_.z); g_j.pitch = g_ck.cab ? 0.0 : 0.12;
+        }
+        else if (tecla == GLFW_KEY_F5) g_guardarYa = true;
+        else if (tecla == GLFW_KEY_T) g_hora = std::fmod(std::floor(g_hora * 4.0 + 1e-6) * 0.25 + 0.25, 1.0);
+        else if (tecla == GLFW_KEY_V) { g_vsync = !g_vsync; glfwSwapInterval(g_vsync ? 1 : 0); }
+        return;
+    }
     if (g_veh.activo && g_veh.pilotando) {      // mientras vuelas solo valen estas teclas
         if (tecla == GLFW_KEY_G) g_pedirG = true;
         else if (tecla == GLFW_KEY_TAB) g_veh.cabina = !g_veh.cabina;
@@ -1767,6 +2413,7 @@ static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
     if (g_menu) return;
     if (tecla == GLFW_KEY_G) g_pedirG = true;
     if (tecla == GLFW_KEY_H) g_pedirH = true;
+    if (tecla == GLFW_KEY_L) g_pedirLanzar = true;
     if (tecla == GLFW_KEY_Z || tecla == GLFW_KEY_C) {      // color del spray / tamano de la rueda
         int d = tecla == GLFW_KEY_C ? 1 : -1;
         if (g_material == ID_SPRAY) g_sprayColor = (g_sprayColor + d + 12) % 12;
@@ -1779,7 +2426,10 @@ static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
         else g_ultEspacio = t;
     }
     if (tecla == GLFW_KEY_T) g_hora = std::fmod(std::floor(g_hora * 4.0 + 1e-6) * 0.25 + 0.25, 1.0);   // saltar a la siguiente fase del dia
+    if (tecla == GLFW_KEY_J && !g_survival) { g_j.p.y += 500.0; g_j.v = {0, 0, 0}; g_j.volar = true; }   // creativo: subir 500 bloques de golpe (para ver la Tierra desde el espacio)
+    if (tecla == GLFW_KEY_K) { g_climaE = (g_climaE + 1) % 5; g_climaT = 150.0; g_climaFijo = false; }   // cambiar el clima a mano
     if (tecla == GLFW_KEY_F5) g_guardarYa = true;
+    if (tecla == GLFW_KEY_F9) g_pedirCiudad = true;       // prueba de rendimiento: ciudad de luces
     if (tecla == GLFW_KEY_B || tecla == GLFW_KEY_LEFT_CONTROL) g_pincelBloque = !g_pincelBloque;
     if (tecla == GLFW_KEY_V) { g_vsync = !g_vsync; glfwSwapInterval(g_vsync ? 1 : 0); }
     if (tecla == GLFW_KEY_X || tecla == GLFW_KEY_0) { g_barra[g_sel] = VACIO; aplicarSel(); }
@@ -1800,6 +2450,7 @@ static void alClic(GLFWwindow* w, int boton, int accion, int) {
         int tipo, idx;
         mundosHit(g_mx, g_my, tipo, idx);
         if (tipo == 0) g_crearNuevo = true;
+        else if (tipo == 5) { g_nuevoProf = !g_nuevoProf; guardarOpciones(); }
         else if (tipo == 1 && g_confBorrar < 0) g_mundoElegido = idx;
         else if (tipo == 2) g_confBorrar = idx;
         else if (tipo == 3) { borrarMundo(g_mundos[idx]); g_mundos = listarMundos(); g_confBorrar = -1; mundosClamp(); }
@@ -1809,6 +2460,17 @@ static void alClic(GLFWwindow* w, int boton, int accion, int) {
     if (g_pausa) {
         if (boton != GLFW_MOUSE_BUTTON_LEFT) return;
         int b = pausaHit(g_mx, g_my);
+        if (g_pausaSub) {   // ajustes de graficos
+            if (b == 0) { g_nubes = (g_nubes + 2) % 3; guardarOpciones(); }        // volumetricas -> simples -> apagadas
+            else if (b == 1) { g_agua = (g_agua + 2) % 3; guardarOpciones(); }     // con olas -> mejorada -> simple
+            else if (b == 2) { g_cielo = !g_cielo; guardarOpciones(); }
+            else if (b == 3) { g_viento = !g_viento; guardarOpciones(); }
+            else if (b == 4) { g_graf = !g_graf; guardarOpciones(); }
+            else if (b == 5) { g_espAtard = !g_espAtard; guardarOpciones(); }
+            else if (b == 6) g_pausaSub = 0;
+            return;
+        }
+        if (b == 10) { g_pausaSub = 1; return; }
         if (b == 0) reanudar(w);
         else if (b == 1) { g_lodOn = !g_lodOn; guardarOpciones(); if (!g_lodOn) lodLiberarTodo(); }
         else if (b == 2) { g_anclaOn = !g_anclaOn; guardarOpciones(); }
@@ -1827,6 +2489,11 @@ static void alClic(GLFWwindow* w, int boton, int accion, int) {
             if (g_pagina == 1) {
                 for (int ri = 0; ri < (int)recetas().size(); ri++) if (mDentro(recRect(g_fbW, g_fbH, ri), qx, qy)) { survCraftear(ri); menuReconstruir(); return; }
             }
+        }
+        if (boton == GLFW_MOUSE_BUTTON_LEFT && !(g_survival && g_pagina == 1)) {   // flechas de pagina
+            double qx = g_mx * g_fbW / std::max(1, g_winW), qy = g_my * g_fbH / std::max(1, g_winH);
+            if (g_menuPag < menuPaginas() - 1 && mDentro(flechaRect(g_fbW, g_fbH, 1), qx, qy)) { g_menuPag++; return; }
+            if (g_menuPag > 0 && mDentro(flechaRect(g_fbW, g_fbH, 0), qx, qy)) { g_menuPag--; return; }
         }
         if (boton == GLFW_MOUSE_BUTTON_RIGHT) {                // clic derecho: soltar lo agarrado o vaciar la casilla
             if (g_mano != -100) { g_mano = -100; g_manoOrigen = -1; }
@@ -1954,12 +2621,26 @@ static const float ICON_C[NTIPOS][3] = {{0.45f, 0.10f, 0.10f}, {0.34f, 0.64f, 0.
                                        {0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0},{0,0,0}, {0.90f, 0.92f, 0.28f}, {0.93f, 0.82f, 0.80f},
                                        {1.0f, 0.10f, 0.10f}, {1.0f, 0.48f, 0.08f}, {1.0f, 0.90f, 0.15f}, {0.60f, 1.0f, 0.12f}, {0.10f, 1.0f, 0.20f}, {0.08f, 1.0f, 0.80f},
                                        {0.15f, 0.70f, 1.0f}, {0.15f, 0.20f, 1.0f}, {0.55f, 0.18f, 1.0f}, {1.0f, 0.15f, 0.80f}, {1.0f, 0.50f, 0.72f}, {1.0f, 1.0f, 1.0f}};
-static const float ICON_NEW[9][3] = {{0.93f, 0.95f, 0.99f}, {0.60f, 0.80f, 0.96f}, {0.25f, 0.55f, 0.25f}, {0.78f, 0.13f, 0.10f}, {0.93f, 0.47f, 0.08f}, {0.94f, 0.80f, 0.13f}, {0.98f, 0.64f, 0.78f}, {0.09f, 0.33f, 0.19f}, {0.66f, 0.60f, 0.30f}};
+static const float ICON_NEW[NTIPOS - NIEVE][3] = {{0.93f, 0.95f, 0.99f}, {0.60f, 0.80f, 0.96f}, {0.25f, 0.55f, 0.25f}, {0.78f, 0.13f, 0.10f}, {0.93f, 0.47f, 0.08f}, {0.94f, 0.80f, 0.13f}, {0.98f, 0.64f, 0.78f}, {0.09f, 0.33f, 0.19f}, {0.66f, 0.60f, 0.30f},
+                                              {0.36f, 0.22f, 0.14f}, {0.07f, 0.40f, 0.12f}, {0.14f, 0.45f, 0.13f}, {0.56f, 0.74f, 0.26f}, {0.92f, 0.95f, 0.97f}, {0.16f, 0.42f, 0.14f},
+                                              {0.90f, 0.12f, 0.12f}, {0.98f, 0.85f, 0.12f}, {0.22f, 0.35f, 0.95f}, {0.98f, 0.45f, 0.75f}, {0.40f, 0.62f, 0.93f}, {0.98f, 0.45f, 0.08f},
+                                              {0.92f, 0.20f, 0.22f}, {0.98f, 0.46f, 0.70f}, {0.98f, 0.52f, 0.14f}, {0.62f, 0.28f, 0.88f}, {0.98f, 0.84f, 0.18f}, {0.20f, 0.50f, 0.95f}, {0.14f, 0.50f, 0.20f}, {0.50f, 0.48f, 0.45f}, {0.80f, 0.12f, 0.10f}, {0.98f, 0.95f, 0.92f}};
 static inline const float* iconColor(int id) { return id >= NIEVE ? ICON_NEW[id - NIEVE] : ICON_C[id]; }
 // icono de un material (o de la herramienta "destruir" en el hueco 0)
 static void hIcono(int slot, float x, float y, float s) {
     const int N = 6;
     float c = s / N;
+    if (slot == ID_POLVORA) {   // montoncito de polvo gris oscuro con motas
+        for (int j = 2; j < N; j++) for (int i = 0; i < N; i++) {
+            int alt = 5 - std::abs(2 * i - 5) / 2 - 1;       // forma de monton
+            if (j < N - 1 - alt) continue;
+            float v = 0.85f + (hh(i, j, 251) - 0.5f) * 0.5f;
+            hRect(x + i * c, y + j * c, c + 0.5f, c + 0.5f, 0.24f * v, 0.24f * v, 0.27f * v);
+        }
+        hRect(x + 2 * c, y + 3 * c, c, c, 0.55f, 0.55f, 0.58f);
+        hRect(x + 4 * c, y + 4 * c, c, c, 0.40f, 0.40f, 0.44f);
+        return;
+    }
     if (slot == ID_SPRAY) {   // lata de spray con la tapa del color elegido
         const float* k = COLOR_CARR[g_sprayColor];
         for (int j = 0; j < N; j++) for (int i = 0; i < N; i++) hRect(x + i * c, y + j * c, c + 0.5f, c + 0.5f, 0.10f, 0.10f, 0.12f);
@@ -1990,6 +2671,14 @@ static void hIcono(int slot, float x, float y, float s) {
         if (slot == HELICE) { for (int i = 0; i < N; i++) hRect(x + i * c, y + (N - 1 - i) * c, c + 0.5f, c + 0.5f, 0.25f, 0.17f, 0.08f); }
         if (slot == TIMON) { for (int i = 1; i < 5; i++) { hRect(x + i * c, y + c, c, c, 0.6f, 0.6f, 0.65f); hRect(x + c, y + i * c, c, c, 0.6f, 0.6f, 0.65f); } }
         if (slot == CONTROL) { hRect(x + 2 * c, y + 2 * c, 2 * c, 2 * c, 0.2f, 0.2f, 0.25f); }
+        return;
+    }
+    if ((slot >= FLOR_ROJA && slot <= FLOR_ROSA) || slot == LIANA) {   // objetos delgados: tallo (y cabeza si es flor)
+        const float* k = iconColor(slot);
+        if (slot == LIANA) { for (int j = 0; j < N; j++) hRect(x + 2 * c, y + j * c, 2 * c, c + 0.5f, k[0], k[1], k[2]); return; }
+        for (int j = 2; j < N; j++) hRect(x + 2.5f * c, y + j * c, c, c + 0.5f, 0.20f, 0.52f, 0.16f);
+        for (int j = 0; j < 3; j++) for (int i = 1; i < 5; i++) if (!((j == 0 || j == 2) && (i == 1 || i == 4))) hRect(x + i * c, y + j * c, c + 0.5f, c + 0.5f, k[0], k[1], k[2]);
+        hRect(x + 2 * c, y + c, 2 * c, c, 1.0f, 0.90f, 0.30f);
         return;
     }
     bool mineral = esMineral((uint8_t)slot);
@@ -2168,7 +2857,7 @@ static bool itemHerrSprite(int id, float col[8][8][3], bool fill[8][8]) {
 }
 static bool g_golpea = false;   // este cuadro estas picando/poniendo (para la animacion de la mano y para los otros jugadores)
 static uint8_t objetoEnMano() {
-    if (g_material < 0 || g_material == 0) return 255;
+    if (g_material < 0 || g_material == 0 || g_material == ID_POLVORA) return 255;
     if (g_survival && g_inv[g_material] <= 0) return 255;
     return (uint8_t)g_material;
 }
@@ -2200,9 +2889,9 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
     std::snprintf(b, sizeof b, "FPS %d", fps); hTexto(b, x, y, t, 1, 1, 1); y += lh;
     std::snprintf(b, sizeof b, "X %d  Y %d  Z %d", (int)std::floor(px_), (int)std::floor(py_), (int)std::floor(pz_)); hTexto(b, x, y, t, 0.9f, 0.9f, 0.9f); y += lh;
     hTexto(g_pincelBloque ? "BLOQUE 2X2 (CTRL)" : "CUBITO (CTRL)", x, y, t, 1.0f, 0.85f, 0.3f); y += lh;
-    hTexto((g_veh.activo && g_veh.pilotando) ? "PILOTANDO" : g_j.volar ? "VOLANDO (F)" : "CAMINANDO (F)", x, y, t, 0.6f, 0.9f, 1.0f); y += lh;
+    hTexto(g_ck.activo ? "EN EL COHETE" : (g_veh.activo && g_veh.pilotando) ? "PILOTANDO" : g_j.volar ? "VOLANDO (F)" : "CAMINANDO (F)", x, y, t, 0.6f, 0.9f, 1.0f); y += lh;
     if (!g_redInfo.empty()) { hTexto(g_redInfo.c_str(), x, y, t, 0.5f, 1.0f, 0.6f); y += lh; }
-    if (g_red.activo()) {
+    if (g_red.activo() || g_chat) {
         double nc = glfwGetTime();
         float cy0 = fbh - 96 * k - (g_chat ? 0.0f : 0.0f);
         int n = 0;
@@ -2244,7 +2933,7 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
     float S = std::floor(48.0f * k), gap = std::floor(5.0f * k);
     float total = 9 * S + 8 * gap, x0 = (fbw - total) / 2.0f, y0 = fbh - S - 16 * k;
     int sel = g_sel;
-    for (int i = 0; i < 9 && !(g_veh.activo && g_veh.pilotando); i++) {
+    for (int i = 0; i < 9 && !(g_veh.activo && g_veh.pilotando) && !g_ck.activo; i++) {
         float sx = x0 + i * (S + gap);
         hRect(sx, y0, S, S, 0, 0, 0, 0.55f);
         float in = 5 * k;
@@ -2254,15 +2943,16 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
         std::snprintf(b, sizeof b, "%d", i + 1);
         hTexto(b, sx + 4 * k, y0 + 3 * k, std::max(2.0f, t - 1), 1, 1, 1);
     }
-    if (g_survival && !(g_veh.activo && g_veh.pilotando)) {
+    if (g_survival && !(g_veh.activo && g_veh.pilotando) && !g_ck.activo) {
         float hs = 18 * k;
         for (int i = 0; i < 10; i++) {
             int lleno = g_vida >= 2 * (i + 1) ? 2 : (g_vida >= 2 * i + 1 ? 1 : 0);
             hCorazon(x0 + i * (hs + 3 * k), y0 - hs - 8 * k, hs, lleno);
         }
     }
+    if (glfwGetTime() - g_explDestello < 0.5) hRect(0, 0, (float)fbw, (float)fbh, 1.0f, 0.95f, 0.8f, (float)(0.85 * g_explFuerza * (1.0 - (glfwGetTime() - g_explDestello) / 0.5)));
     if (g_survival && glfwGetTime() - g_danoFlash < 0.4) hRect(0, 0, (float)fbw, (float)fbh, 0.85f, 0.0f, 0.0f, 0.35f * (float)(1.0 - (glfwGetTime() - g_danoFlash) / 0.4));
-    if (!g_menu && !(g_veh.activo && g_veh.pilotando)) {
+    if (!g_menu && !(g_veh.activo && g_veh.pilotando) && !g_ck.activo) {
         char nm[64];
         if (g_material < 0) std::snprintf(nm, sizeof nm, "MANO VACIA");
         else if (g_destruir) std::snprintf(nm, sizeof nm, "DESTRUIR");
@@ -2281,6 +2971,48 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
         hTexto(g_veh.suelo ? "EN TIERRA" : "EN EL AIRE", 12 * k, iy, t, 0.7f, 0.85f, 1.0f); iy += lh;
 #ifndef MOVIL
         const char* ayuda = "SHIFT/CTRL GAS  W/S PICAR  A/D INCLINAR  Q/E TIMON  ESPACIO FRENO  TAB CAMARA  G BAJAR";
+        float pa = t;
+        while (pa > 1 && hAncho(ayuda, pa) > fbw - 24 * k) pa -= 1;
+        hTexto(ayuda, (fbw - hAncho(ayuda, pa)) / 2.0f, fbh - 14 * k - 7 * pa, pa, 0.9f, 0.9f, 0.9f);
+#endif
+    }
+    if (g_ck.activo) {      // instrumentos del cohete
+        const Cohete& c = g_ck;
+        char ib[120];
+        float iy = fbh * 0.30f;
+        double alt = (c.fase < 2 ? c.P.y : c.e2.p.y), vel = c.fase == 0 ? 0.0 : (c.fase == 1 ? c.sp : std::sqrt(c.V.x * c.V.x + c.V.y * c.V.y + c.V.z * c.V.z));
+        std::snprintf(ib, sizeof ib, "VELOCIDAD %d KM/H", (int)(vel * 3.6)); hTexto(ib, 12 * k, iy, t, 0.8f, 1.0f, 0.8f); iy += lh;
+        std::snprintf(ib, sizeof ib, "ALTURA %d BLOQUES", (int)alt); hTexto(ib, 12 * k, iy, t, 0.8f, 1.0f, 0.8f); iy += lh;
+        const char* fase = c.fase == 0 ? "CUENTA ATRAS" : (c.fase == 1 ? "ETAPA 1 ENCENDIDA" : (c.llegada ? "LUNA ALCANZADA" : c.quema ? "MOTOR ENCENDIDO" : g_terraFija ? "RUMBO A LA LUNA" : "ORBITA - GRAVEDAD 0"));
+        hTexto(fase, 12 * k, iy, t, 1.0f, 0.9f, 0.5f); iy += lh;
+        if (c.fase == 1) { std::snprintf(ib, sizeof ib, "SEPARACION EN %d BLOQUES", std::max(0, (int)(1500.0 - (c.P.y - c.y0)))); hTexto(ib, 12 * k, iy, t, 0.7f, 0.85f, 1.0f); iy += lh; }
+        if (c.fase == 2) {
+            std::snprintf(ib, sizeof ib, "COMBUSTIBLE %d", (int)(c.fuel + 0.5)); hTexto(ib, 12 * k, iy, t, c.fuel > 20 ? 0.8f : 1.0f, c.fuel > 20 ? 1.0f : 0.5f, 0.6f); iy += lh;
+            if (!g_modoLuna) { double lz = ckLuzSuelo(c.e2.p); std::snprintf(ib, sizeof ib, "LUZ EN EL SUELO %d %s", (int)std::max(0.0, lz * 100.0), lz < 0.30 ? "- OSCURO: BUSCA EL LADO CLARO" : "- SE PUEDE ATERRIZAR"); hTexto(ib, 12 * k, iy, t, lz < 0.30 ? 1.0f : 0.5f, lz < 0.30 ? 0.6f : 1.0f, 0.5f); iy += lh; }
+            std::snprintf(ib, sizeof ib, "LUNA A %d BLOQUES", (int)g_ckM.dist); hTexto(ib, 12 * k, iy, t, 0.85f, 0.85f, 1.0f); iy += lh;
+            double gr = g_ckM.ang * 57.29578;
+            std::snprintf(ib, sizeof ib, "PUNTERIA %.1f GRADOS%s", gr, gr < 3.0 ? " - BIEN" : ""); hTexto(ib, 12 * k, iy, t, gr < 3.0 ? 0.4f : 1.0f, gr < 3.0 ? 1.0f : 0.8f, 0.4f); iy += lh;
+            // marcadores
+            auto marca = [&](float mx, float my, bool dentro, const char* txt, float r, float g, float b, float sz) {
+                float h = sz * k;
+                if (dentro) hMarco(mx - h, my - h, 2 * h, 2 * h, std::max(2.0f, 2 * k), r, g, b);
+                else hRect(mx - h * 0.5f, my - h * 0.5f, h, h, r, g, b);
+                hTexto(txt, mx - hAncho(txt, t) / 2.0f, my + h + 3 * k, t, r, g, b);
+            };
+            if (c.llegada == false) marca(g_ckM.lx, g_ckM.ly, g_ckM.lDentro, "LUNA", 0.85f, 0.9f, 1.0f, 22);
+            else if (!g_modoLuna) marca(g_ckM.sx, g_ckM.sy, g_ckM.sDentro, "SOL", 1.0f, 0.9f, 0.4f, 18);
+            { float h = 9 * k; float px_ = g_ckM.px, py_ = g_ckM.py; float cr = gr < 3.0 ? 0.4f : 1.0f, cg = 1.0f, cb = gr < 3.0 ? 0.4f : 0.7f;
+              hRect(px_ - h, py_ - 1 * k, 2 * h, 2 * k, cr, cg, cb); hRect(px_ - 1 * k, py_ - h, 2 * k, 2 * h, cr, cg, cb);
+              hTexto("PROA", px_ - hAncho("PROA", t) / 2.0f, py_ + h + 3 * k, t, cr, cg, cb); }
+        }
+        if (c.fase == 0) {
+            char nb[8]; std::snprintf(nb, sizeof nb, "%d", std::max(1, (int)std::ceil(5.0 - c.t)));
+            float tb = t * 7;
+            hTexto(nb, (fbw - hAncho(nb, tb)) / 2.0f, fbh * 0.30f, tb, 1.0f, 0.85f, 0.3f);
+        }
+#ifndef MOVIL
+        const char* ayuda = c.fase == 2 ? "W/S A/D Q/E: GIRAR   MANTEN 2: MOTOR   3: DESCENDER (SOLO DONDE HAY LUZ)   MOUSE: CAMARA   TAB: CABINA"
+                                        : "MOUSE: CAMARA   TAB: CABINA   G: CANCELAR Y VOLVER A LA TIERRA";
         float pa = t;
         while (pa > 1 && hAncho(ayuda, pa) > fbw - 24 * k) pa -= 1;
         hTexto(ayuda, (fbw - hAncho(ayuda, pa)) / 2.0f, fbh - 14 * k - 7 * pa, pa, 0.9f, 0.9f, 0.9f);
@@ -2321,7 +3053,8 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
                     char l1[64]; std::snprintf(l1, sizeof l1, "%s%s", R[ri].n > 1 ? "" : "", nombreSlot(R[ri].out));
                     if (R[ri].n > 1) std::snprintf(l1, sizeof l1, "%s X%d", nombreSlot(R[ri].out), R[ri].n);
                     char l2[96];
-                    if (R[ri].nb) std::snprintf(l2, sizeof l2, "%d %s + %d %s", R[ri].na, nombreSlot(R[ri].a), R[ri].nb, nombreSlot(R[ri].b));
+                    if (R[ri].nc) std::snprintf(l2, sizeof l2, "%d %s + %d %s + %d %s", R[ri].na, nombreSlot(R[ri].a), R[ri].nb, nombreSlot(R[ri].b), R[ri].nc, nombreSlot(R[ri].c));
+                    else if (R[ri].nb) std::snprintf(l2, sizeof l2, "%d %s + %d %s", R[ri].na, nombreSlot(R[ri].a), R[ri].nb, nombreSlot(R[ri].b));
                     else std::snprintf(l2, sizeof l2, "%d %s", R[ri].na, nombreSlot(R[ri].a));
                     float p1 = std::max(2.0f, t - 1), p2 = std::max(1.0f, t - 1);
                     hTexto(l1, rr.x + rr.h + 4 * k, rr.y + 4 * k, p1, 1, 1, 1);
@@ -2329,9 +3062,29 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
                 }
             }
         }
-        for (int i = 0; i < (g_survival && g_pagina == 1 ? 0 : (int)g_menuItems.size()); i++) {
+        if (!(g_survival && g_pagina == 1) && menuPaginas() > 1) {      // flechas y numero de pagina
+            double qx = g_mx * fbw / std::max(1, g_winW), qy = g_my * fbh / std::max(1, g_winH);
+            for (int dir = 0; dir < 2; dir++) {
+                bool hay = dir == 1 ? g_menuPag < menuPaginas() - 1 : g_menuPag > 0;
+                MRect fr = flechaRect(fbw, fbh, dir);
+                bool hv = hay && mDentro(fr, qx, qy);
+                hRect(fr.x, fr.y, fr.w, fr.h, hay ? (hv ? 0.30f : 0.16f) : 0.08f, hay ? (hv ? 0.55f : 0.34f) : 0.08f, hay ? (hv ? 0.30f : 0.20f) : 0.08f, 0.95f);
+                hMarco(fr.x, fr.y, fr.w, fr.h, std::max(2.0f, 2 * k), hv ? 1.0f : 0.4f, hv ? 0.85f : 0.4f, hv ? 0.2f : 0.4f);
+                const int NC = 8; float cw = fr.w * 0.5f / NC, ah = fr.h * 0.62f;
+                for (int c = 0; c < NC; c++) {
+                    float hc = ah * (1.0f - (float)c / NC);
+                    float xx = dir == 1 ? fr.x + fr.w * 0.25f + c * cw : fr.x + fr.w * 0.75f - (c + 1) * cw;
+                    hRect(xx, fr.y + (fr.h - hc) / 2.0f, cw + 0.5f, hc, hay ? 1.0f : 0.3f, hay ? 1.0f : 0.3f, hay ? 0.85f : 0.3f);
+                }
+            }
+            char pg[32]; std::snprintf(pg, sizeof pg, "PAGINA %d/%d", g_menuPag + 1, menuPaginas());
+            hTexto(pg, (fbw - hAncho(pg, t)) / 2.0f, ys - 112 * k, t, 1, 0.9f, 0.5f);
+        }
+        for (int j = 0; j < (g_survival && g_pagina == 1 ? 0 : MENU_PAG); j++) {
+            int i = g_menuPag * MENU_PAG + j;
+            if (i >= (int)g_menuItems.size()) break;
             float sx, sy, sz;
-            menuGeom(fbw, fbh, i, sx, sy, sz);
+            menuGeom(fbw, fbh, j, sx, sy, sz);
             hRect(sx - 6 * k, sy - 6 * k, sz + 12 * k, sz + 12 * k, 0.1f, 0.1f, 0.1f, 0.9f);
             const int ti2 = g_menuItems[i];
             hIcono(ti2, sx, sy, sz);
@@ -2398,6 +3151,7 @@ static void mundosDibujar(int fbw, int fbh) {
     const char* sub = "ELIGE TU MUNDO";
     hTexto(sub, (fbw - hAncho(sub, t)) / 2.0f, 18 * k + 9 * tp + 6 * k, t, 0.85f, 0.88f, 0.95f);
     hBoton(mRNuevo(b), k, 0.16f, 0.50f, 0.22f, tipoH == 0, "+ NUEVO MUNDO", t * 1.5f);
+    hBoton(mRProf(b), k, g_nuevoProf ? 0.08f : 0.22f, g_nuevoProf ? 0.22f : 0.24f, g_nuevoProf ? 0.55f : 0.28f, tipoH == 5, g_nuevoProf ? "MARES PROFUNDOS: SI" : "MARES PROFUNDOS: NO", t * 0.95f);
     if (g_mundos.empty()) {
         const char* m = "TODAVIA NO HAY MUNDOS GUARDADOS";
         hTexto(m, (fbw - hAncho(m, t)) / 2.0f, b.yLista + 20 * k, t, 0.8f, 0.8f, 0.8f);
@@ -2430,7 +3184,7 @@ static void mundosDibujar(int fbw, int fbh) {
         char mm[64]; std::snprintf(mm, sizeof mm, "RUEDA: VER MAS (%d/%d)", g_scrollM + 1, (int)g_mundos.size() - b.vis + 1);
         hTexto(mm, b.x0, fbh - 36 * k - 26 * t, t, 0.9f, 0.9f, 0.9f);
     }
-    const char* ay = "CLIC: JUGAR    N: NUEVO    ENTER: ULTIMO MUNDO    ESC: SALIR";
+    const char* ay = "CLIC: JUGAR    N: NUEVO    P: MARES PROFUNDOS    ENTER: ULTIMO MUNDO    ESC: SALIR";
     hTexto(ay, (fbw - hAncho(ay, t)) / 2.0f, fbh - 36 * k - 12 * t, t, 1.0f, 1.0f, 1.0f);
 }
 
@@ -2441,13 +3195,32 @@ static void pausaDibujar(int fbw, int fbh) {
     float tp = std::max(4.0f, std::floor(6.0f * k));
     hTexto(ti, (fbw - hAncho(ti, tp)) / 2.0f, fbh * 0.28f - 9 * tp, tp, 1.0f, 0.88f, 0.35f);
     int hov = pausaHit(g_mx, g_my);
+    if (g_pausaSub) {   // ajustes de graficos
+        static const char* NN[3] = {"NUBES: APAGADAS", "NUBES: SIMPLES", "NUBES: VOLUMETRICAS"};
+        static const char* NA[3] = {"AGUA: SIMPLE", "AGUA: MEJORADA", "AGUA: MEJORADA + OLAS"};
+        hBoton(pausaRect(fbw, fbh, 0), k, g_nubes ? 0.16f : 0.45f, g_nubes ? 0.36f : 0.20f, g_nubes ? 0.60f : 0.20f, hov == 0, NN[g_nubes], t * 1.25f);
+        hBoton(pausaRect(fbw, fbh, 1), k, g_agua ? 0.16f : 0.45f, g_agua ? 0.36f : 0.20f, g_agua ? 0.60f : 0.20f, hov == 1, NA[g_agua], t * 1.25f);
+        hBoton(pausaRect(fbw, fbh, 2), k, g_cielo ? 0.16f : 0.45f, g_cielo ? 0.36f : 0.20f, g_cielo ? 0.60f : 0.20f, hov == 2,
+               g_cielo ? "CIELO: ATMOSFERA" : "CIELO: SIMPLE", t * 1.25f);
+        hBoton(pausaRect(fbw, fbh, 3), k, g_viento ? 0.16f : 0.45f, g_viento ? 0.36f : 0.20f, g_viento ? 0.60f : 0.20f, hov == 3,
+               g_viento ? "VIENTO EN HOJAS: ON" : "VIENTO EN HOJAS: OFF", t * 1.25f);
+        hBoton(pausaRect(fbw, fbh, 4), k, g_graf ? 0.16f : 0.45f, g_graf ? 0.36f : 0.20f, g_graf ? 0.60f : 0.20f, hov == 4,
+               g_graf ? "SOMBRAS Y EFECTOS: ON" : "SOMBRAS Y EFECTOS: OFF", t * 1.25f);
+        hBoton(pausaRect(fbw, fbh, 5), k, g_espAtard ? 0.16f : 0.45f, g_espAtard ? 0.36f : 0.20f, g_espAtard ? 0.60f : 0.20f, hov == 5,
+               g_espAtard ? "ATARDECER EN EL ESPACIO: SI" : "ATARDECER EN EL ESPACIO: NO", t * 1.25f);
+        hBoton(pausaRect(fbw, fbh, 6), k, 0.16f, 0.50f, 0.22f, hov == 6, "VOLVER", t * 1.5f);
+        const char* ay2 = "LAS NUBES VOLUMETRICAS NECESITAN SOMBRAS Y EFECTOS ON";
+        hTexto(ay2, (fbw - hAncho(ay2, t)) / 2.0f, pausaRect(fbw, fbh, 8).y, t, 0.8f, 0.8f, 0.85f);
+        return;
+    }
     hBoton(pausaRect(fbw, fbh, 0), k, 0.16f, 0.50f, 0.22f, hov == 0, "CONTINUAR", t * 1.5f);
     hBoton(pausaRect(fbw, fbh, 1), k, g_lodOn ? 0.16f : 0.45f, g_lodOn ? 0.36f : 0.20f, g_lodOn ? 0.60f : 0.20f, hov == 1,
            g_lodOn ? "MUNDO LEJANO: ON" : "MUNDO LEJANO: OFF", t * 1.25f);
     hBoton(pausaRect(fbw, fbh, 2), k, g_anclaOn ? 0.16f : 0.45f, g_anclaOn ? 0.36f : 0.20f, g_anclaOn ? 0.60f : 0.20f, hov == 2,
            g_anclaOn ? "CAMBIOS LEJANOS: ON" : "CAMBIOS LEJANOS: OFF", t * 1.25f);
-    hBoton(pausaRect(fbw, fbh, 3), k, g_graf ? 0.16f : 0.45f, g_graf ? 0.36f : 0.20f, g_graf ? 0.60f : 0.20f, hov == 3,
+    hBoton(graficosRect(fbw, fbh), k, g_graf ? 0.16f : 0.45f, g_graf ? 0.36f : 0.20f, g_graf ? 0.60f : 0.20f, hov == 3,
            g_graf ? "GRAFICOS: ON" : "GRAFICOS: OFF", t * 1.25f);
+    hBoton(ajustesRect(fbw, fbh), k, 0.30f, 0.26f, 0.50f, hov == 10, "AJUSTES", t * 1.1f);
     hBoton(pausaRect(fbw, fbh, 4), k, 0.45f, 0.32f, 0.10f, hov == 4, g_survival ? "MODO: SURVIVAL" : "MODO: CREATIVO", t * 1.25f);
     {
         static const char* NP[3] = {"RENDIMIENTO: NORMAL", "RENDIMIENTO: ALTO", "RENDIMIENTO: MAXIMO"};
@@ -2476,6 +3249,253 @@ static void leerArgs(int argc, char** argv) {   // --hospedar [puerto]   --unir 
     if (const char* e = std::getenv("RED_NOMBRE")) g_argNombre = e;
     if (const char* e = std::getenv("RED_PUERTO")) g_argPuerto = std::atoi(e);
 }
+// ---------------------------------------------------------------- prueba de rendimiento: ciudad de luces (F9)
+// Construye delante de ti, a escala de cubitos, 16 edificios de 20x20 bloques (de 20 a 56 de alto) con pisos, ventanas, miles de luces LED
+// de 12 colores en los techos, postes de luz y antorchas en las calles. Cuando termina de mallarse, mide los FPS girando la camara
+// 20 segundos y escribe el resultado en rendimiento.txt (y lo muestra en pantalla).
+struct Bench { std::vector<ChunkP> chunks; int estado = 0; double t0 = 0, tFase = 0, peorCarga = 0; std::vector<float> dts; int nLed = 0, nCub = 0, nChunks = 0; } g_bench;
+static void construirCiudad() {
+    std::unordered_set<Chunk*> sucios, editados;
+    long nLed = 0, nCub = 0, omitidos = 0;
+    auto poner = [&](int vx, int vy, int vz, uint8_t t) {
+        int cy = divPiso(vy, CS);
+        if (cy < 0 || cy >= HYC) return;
+        int cx = divPiso(vx, CS), cz = divPiso(vz, CS);
+        ChunkP c = buscar(cx, cy, cz);
+        if (!c || c->state.load() < ST_READY) { omitidos++; return; }
+        if (!c->dat.d) {
+            if (c->dat.uni == t) return;
+            c->dat.d = std::make_shared<std::vector<uint8_t>>((size_t)CS * CS * CS, c->dat.uni);
+        }
+        int lx = vx - cx * CS, ly = vy - cy * CS, lz = vz - cz * CS;
+        (*c->dat.d)[IDX(lx, ly, lz)] = t;
+        nCub++; if (t >= LED_ROJO && t <= LED_BLANCO) nLed++;
+        if (editados.insert(c.get()).second) { c->sucioDisco = true; g_editCols.insert(colKey(cx, cz)); }   // SIEMPRE se marca para guardar (antes un chunk anotado antes como vecino no se guardaba y la ciudad desaparecia al volver)
+        sucios.insert(c.get());
+        if (lx == 0) { ChunkP k = buscar(cx - 1, cy, cz); if (k) sucios.insert(k.get()); }
+        if (lx == CS - 1) { ChunkP k = buscar(cx + 1, cy, cz); if (k) sucios.insert(k.get()); }
+        if (ly == 0) { ChunkP k = buscar(cx, cy - 1, cz); if (k) sucios.insert(k.get()); }
+        if (ly == CS - 1) { ChunkP k = buscar(cx, cy + 1, cz); if (k) sucios.insert(k.get()); }
+        if (lz == 0) { ChunkP k = buscar(cx, cy, cz - 1); if (k) sucios.insert(k.get()); }
+        if (lz == CS - 1) { ChunkP k = buscar(cx, cy, cz + 1); if (k) sucios.insert(k.get()); }
+    };
+    // centro: 70 bloques delante de ti
+    const double fx = std::sin(g_j.yaw), fz = -std::cos(g_j.yaw);
+    const int TAM = 40, CALLE = 20, NB = 4;                       // en cubitos: edificio 40 (=20 bloques), calle 20 (=10 bloques)
+    const int LADO = NB * TAM + (NB - 1) * CALLE;                 // 220 cubitos (110 bloques)
+    const int cxm = (int)std::floor((g_j.p.x + fx * 70.0) * SUB), czm = (int)std::floor((g_j.p.z + fz * 70.0) * SUB);
+    const int x0 = cxm - LADO / 2, z0 = czm - LADO / 2;
+    // suelo plano: sobre el punto mas alto del terreno de la zona
+    int gy = 0;
+    for (int a = 0; a <= 8; a++) for (int b = 0; b <= 8; b++)
+        gy = std::max(gy, (int)std::floor(alturaTerreno((x0 + LADO * a / 8.0) / SUB, (z0 + LADO * b / 8.0) / SUB) * SUB));
+    gy += 2;
+    for (int z = z0; z < z0 + LADO; z++) for (int x = x0; x < x0 + LADO; x++) {
+        int th = (int)std::floor(alturaTerreno((x + 0.5) / SUB, (z + 0.5) / SUB) * SUB);
+        for (int y = std::max(0, th - 1); y <= gy; y++) poner(x, y, z, PIEDRA);
+    }
+    for (int bi = 0; bi < NB; bi++) for (int bj = 0; bj < NB; bj++) {
+        const int bx = x0 + bi * (TAM + CALLE), bz = z0 + bj * (TAM + CALLE);
+        const int alto = (20 + 12 * ((bi * 3 + bj * 5) % 4)) * SUB;      // 20, 32, 44 o 56 bloques
+        const int piso = 6 * SUB;                                       // piso cada 6 bloques
+        for (int y = 1; y <= alto; y++) {
+            const int ly = y % piso;
+            const bool ventana = ly >= piso / 3 && ly <= 2 * piso / 3;
+            for (int z = 0; z < TAM; z++) for (int x = 0; x < TAM; x++) {
+                const bool borde = x < 2 || z < 2 || x >= TAM - 2 || z >= TAM - 2;
+                uint8_t t = AIRE;
+                if (borde) {
+                    t = (ventana && ((x + z) / 2) % 3 != 0) ? VIDRIO : ((y / piso) % 2 ? PIEDRA : MADERA);
+                    if (bj == 0 || true) { if (z < 2 && x >= TAM / 2 - 3 && x < TAM / 2 + 3 && y < 10 * SUB) t = AIRE; }      // puerta
+                }
+                else if (ly == 0 || y == alto) t = PIEDRA;                                       // piso / techo
+                else if (ly == piso - 1) {                                                       // luces de colores en el techo de cada piso
+                    if (x % 6 == 3 && z % 6 == 3) t = (uint8_t)(LED_ROJO + ((x / 6 + z / 6 + y / piso + bi + bj) % 12));
+                }
+                else if ((x == TAM / 2 || x == TAM / 2 + 1) && (z == TAM / 2 || z == TAM / 2 + 1)) t = PIEDRA;   // pilar central
+                if (t != AIRE || (!borde && ly != 0)) poner(bx + x, gy + y, bz + z, t);
+            }
+        }
+        // azotea: antenas con luces
+        for (int k = 0; k < 6; k++) { poner(bx + 4 + k * 6, gy + alto + 1, bz + 4, (uint8_t)(LED_ROJO + (bi * 4 + bj + k) % 12)); poner(bx + 4 + k * 6, gy + alto + 2, bz + TAM - 5, (uint8_t)(LED_ROJO + (bi + bj * 4 + k) % 12)); }
+    }
+    // calles: postes de luz de colores y antorchas
+    for (int a = 0; a < LADO; a += 10) for (int c = 0; c < NB - 1; c++) {
+        const int off = (c + 1) * TAM + c * CALLE + CALLE / 2;
+        for (int h = 1; h <= 10; h++) { poner(x0 + off, gy + h, z0 + a, h == 10 ? (uint8_t)(LED_ROJO + (a / 10 + c) % 12) : PIEDRA); poner(x0 + a, gy + h, z0 + off, h == 10 ? (uint8_t)(LED_ROJO + (a / 10 + c + 5) % 12) : PIEDRA); }
+        poner(x0 + off + 2, gy + 2, z0 + a, ANTORCHA); poner(x0 + a, gy + 2, z0 + off + 2, ANTORCHA);
+    }
+    g_bench = Bench();
+    for (Chunk* c : sucios) { ChunkP cp = buscar(c->cx, c->cy, c->cz); if (cp) { remallarAsync(cp); g_bench.chunks.push_back(cp); } }
+    g_bench.estado = 1; g_bench.t0 = glfwGetTime(); g_bench.nLed = (int)nLed; g_bench.nCub = (int)nCub; g_bench.nChunks = (int)sucios.size();
+    char b[160];
+    std::snprintf(b, sizeof b, "CIUDAD DE LUCES: %ld LED, %ld CUBITOS, %d CHUNKS. ESPERANDO MALLAS...", nLed, nCub, (int)sucios.size());
+    if (omitidos > 0) { std::snprintf(b, sizeof b, "CIUDAD INCOMPLETA: %ld CUBITOS EN CHUNKS SIN CARGAR. ESPERA A QUE CARGUE EL MUNDO Y PULSA F9 DE NUEVO", omitidos); }
+    g_aviso = b; g_avisoT = glfwGetTime();
+    std::printf("%s | centro bloques x=%.1f z=%.1f | chunks marcados para guardar %d | cubitos omitidos (chunk sin cargar) %ld\n", b, cxm / (double)SUB, czm / (double)SUB, (int)editados.size(), omitidos);
+}
+// ---------------------------------------------------------------- cohete de dos etapas (comando /cohete)
+// Escala: 1 cubito = ~0.6 m (110 cubitos de alto = ~66 m). La forma del cohete esta en cohete.h (cohGeom).
+// Junto al cohete se levanta una torre con 4 tramos de escaleras en zigzag (77 escalones de 1 cubito) hasta la puerta de la cabina,
+// que esta en la etapa 2 (para que la cabina no se suelte con la etapa 1).
+static void construirCohete() {
+    if (g_ck.activo) { aviso("YA ESTAS VOLANDO EN EL COHETE"); return; }
+    std::unordered_set<Chunk*> sucios, editados;
+    long nCub = 0, omitidos = 0;
+    auto poner = [&](int vx, int vy, int vz, uint8_t t) {
+        int cy = divPiso(vy, CS);
+        if (cy < 0 || cy >= HYC) return;
+        int cx = divPiso(vx, CS), cz = divPiso(vz, CS);
+        ChunkP c = buscar(cx, cy, cz);
+        if (!c || c->state.load() < ST_READY) { omitidos++; return; }
+        if (!c->dat.d) {
+            if (c->dat.uni == t) return;
+            c->dat.d = std::make_shared<std::vector<uint8_t>>((size_t)CS * CS * CS, c->dat.uni);
+        }
+        int lx = vx - cx * CS, ly = vy - cy * CS, lz = vz - cz * CS;
+        if ((*c->dat.d)[IDX(lx, ly, lz)] == t) return;
+        (*c->dat.d)[IDX(lx, ly, lz)] = t;
+        nCub++;
+        if (editados.insert(c.get()).second) { c->sucioDisco = true; g_editCols.insert(colKey(cx, cz)); }
+        sucios.insert(c.get());
+        if (lx == 0) { ChunkP k = buscar(cx - 1, cy, cz); if (k) sucios.insert(k.get()); }
+        if (lx == CS - 1) { ChunkP k = buscar(cx + 1, cy, cz); if (k) sucios.insert(k.get()); }
+        if (ly == 0) { ChunkP k = buscar(cx, cy - 1, cz); if (k) sucios.insert(k.get()); }
+        if (ly == CS - 1) { ChunkP k = buscar(cx, cy + 1, cz); if (k) sucios.insert(k.get()); }
+        if (lz == 0) { ChunkP k = buscar(cx, cy, cz - 1); if (k) sucios.insert(k.get()); }
+        if (lz == CS - 1) { ChunkP k = buscar(cx, cy, cz + 1); if (k) sucios.insert(k.get()); }
+    };
+    const double fx = std::sin(g_j.yaw), fz = -std::cos(g_j.yaw);
+    int ax, az;                                   // direccion de la puerta y de la torre (hacia ti)
+    if (std::fabs(fx) > std::fabs(fz)) { ax = fx > 0 ? -1 : 1; az = 0; } else { ax = 0; az = fz > 0 ? -1 : 1; }
+    const int cxm = (int)std::floor((g_j.p.x + fx * 40.0) * SUB), czm = (int)std::floor((g_j.p.z + fz * 40.0) * SUB);
+    // (u = hacia fuera por el eje de la puerta, v = lado)
+    auto X = [&](int u, int v) { return cxm + ax * u - az * v; };
+    auto Z = [&](int u, int v) { return czm + az * u + ax * v; };
+    auto terr = [&](int x, int z) { return (int)std::floor(alturaTerreno((x + 0.5) / SUB, (z + 0.5) / SUB) * SUB); };
+    int gy = 0;
+    for (int a = -12; a <= 60; a += 4) for (int b = -14; b <= 16; b += 4) gy = std::max(gy, terr(X(a, b), Z(a, b)));
+    gy += 2;
+    if ((gy + 1 + CK_H + 4) / CS >= HYC) {
+        g_aviso = "AQUI NO HAY ALTURA PARA EL COHETE: PRUEBA EN UN LUGAR MAS BAJO"; g_avisoT = glfwGetTime();
+        return;
+    }
+    auto yh = [&](int h) { return gy + 1 + h; };
+    // plataforma de lanzamiento (circulo de radio 13) y limpieza del aire encima
+    for (int dz = -13; dz <= 13; dz++) for (int dx = -13; dx <= 13; dx++) {
+        if (dx * dx + dz * dz > 13 * 13) continue;
+        int x = cxm + dx, z = czm + dz;
+        for (int y = std::max(0, terr(x, z) - 1); y <= gy; y++) poner(x, y, z, PIEDRA);
+        for (int h = 0; h <= CK_H + 2; h++) if (leerCubito(x, yh(h), z) != AIRE) poner(x, yh(h), z, AIRE);
+    }
+    // limpiar el aire de la torre
+    for (int u = 3; u <= 56; u++) for (int v = -4; v <= 12; v++) {
+        int x = X(u, v), z = Z(u, v);
+        for (int h = 0; h <= CK_FLOOR + 12; h++) if (leerCubito(x, yh(h), z) != AIRE) poner(x, yh(h), z, AIRE);
+    }
+    // ---- torre de escaleras
+    const int FL = CK_FLOOR;
+    auto Hs = [&](int j) { return FL - 78 + j; };            // altura del cubito de arriba del escalon j (1..77)
+    auto losa = [&](int u, int v, int h, uint8_t t) { poner(X(u, v), yh(h), Z(u, v), t); poner(X(u, v), yh(h - 1), Z(u, v), t); };
+    auto baranda = [&](int u, int v, int h) { poner(X(u, v), yh(h + 1), Z(u, v), ALUMINIO); poner(X(u, v), yh(h + 2), Z(u, v), ALUMINIO); };
+    auto columna = [&](int u, int v, int hTop) {
+        int x = X(u, v), z = Z(u, v);
+        for (int y = std::max(0, terr(x, z) - 1); y <= yh(hTop - 2); y++) poner(x, y, z, TITANIO);
+    };
+    auto vuelo = [&](int j0, int j1, int u0, int dir, int v0, int v1) {     // escalones j0..j1; dir +1 se aleja del cohete, -1 se acerca
+        for (int j = j0; j <= j1; j++) {
+            int k = j - j0, h = Hs(j);
+            for (int m = 0; m < 2; m++) {
+                int u = u0 + dir * (2 * k + m);
+                for (int v = v0; v <= v1; v++) losa(u, v, h, (j & 1) ? PIEDRA : ARCILLA);
+                baranda(u, v0, h); baranda(u, v1, h);
+                if (m == 0 && (k % 6 == 0 || j == j1)) { columna(u, v0, h); columna(u, v1, h); }
+            }
+        }
+    };
+    auto descanso = [&](int u0, int u1, int h, bool bV0, bool bV1, bool bU0, bool bU1, int uCerrado) {
+        for (int u = u0; u <= u1; u++) for (int v = -3; v <= 11; v++) losa(u, v, h, PIEDRA);
+        for (int u = u0; u <= u1; u++) { if (bV0) baranda(u, -3, h); if (bV1) baranda(u, 11, h); }
+        for (int v = -3; v <= 11; v++) { if (bU0) baranda(u0, v, h); if (bU1 && v <= uCerrado) baranda(u1, v, h); }
+        for (int u : {u0, (u0 + u1) / 2, u1}) for (int v : {-3, 4, 11}) columna(u, v, h);
+    };
+    vuelo(1, 19, 12, +1, -3, 3);                       // A
+    descanso(50, 56, Hs(19), true, true, false, true, 99);
+    vuelo(20, 38, 49, -1, 5, 11);                      // B
+    descanso(6, 11, Hs(38), true, true, true, false, 99);
+    vuelo(39, 57, 12, +1, -3, 3);                      // C
+    descanso(50, 56, Hs(57), true, true, false, true, 99);
+    vuelo(58, 77, 49, -1, 5, 11);                      // D
+    descanso(3, 9, FL, true, true, true, true, 4);     // puerta de la cabina
+    // ---- el cohete
+    {
+        std::vector<CCel> cel;
+        cohGeom(cel);
+        const int cfx = -ax, cfz = -az, crx = -cfz, crz = cfx;
+        for (auto& c : cel) poner(cxm + c.x * crx + c.z * cfx, yh(c.y), czm + c.x * crz + c.z * cfz, c.t);
+    }
+    g_cohInfo = {true, cxm, czm, gy, ax, az};
+    ckGuardarInfo();
+    for (Chunk* c : sucios) { ChunkP cp = buscar(c->cx, c->cy, c->cz); if (cp) remallarAsync(cp); }
+    if (const char* cv = std::getenv("COHETE_VER")) {            // (pruebas) 1: en el descanso de la puerta, 2: dentro de la cabina, 3: al pie de la torre
+        const int m = std::atoi(cv);
+        if (m == 3) g_j.p = {(X(20, 0) + 0.5) / SUB, (gy + 1) / (double)SUB + 0.1, (Z(20, 0) + 0.5) / SUB};
+        else if (m == 1) g_j.p = {(X(7, 0) + 0.5) / SUB, (yh(FL) + 1) / (double)SUB + 0.05, (Z(7, 0) + 0.5) / SUB};
+        else g_j.p = {(cxm + 0.5) / SUB, (yh(FL) + 1) / (double)SUB + 0.05, (czm + 0.5) / SUB};
+        g_j.yaw = std::atan2((double)-ax, (double)az); g_j.pitch = 0.0; g_j.v = {0, 0, 0};
+        if (m == 3) { g_j.yaw += 3.14159265; g_j.pitch = 0.5; }
+        if (m == 9) if (const char* cp = std::getenv("COHETE_POS")) {      // (pruebas) COHETE_POS=u,v,h,giro(grados),cabeceo(grados)
+            double u, v, h, gi, ca; if (std::sscanf(cp, "%lf,%lf,%lf,%lf,%lf", &u, &v, &h, &gi, &ca) == 5) {
+                g_j.p = {(X((int)u, (int)v) + 0.5) / SUB, (yh((int)h) + 0.5) / (double)SUB, (Z((int)u, (int)v) + 0.5) / SUB};
+                g_j.yaw = std::atan2((double)-ax, (double)az) + gi * 3.14159265 / 180.0; g_j.pitch = ca * 3.14159265 / 180.0; g_j.volar = true;
+            }
+        }
+    }
+    char b[200];
+    if (omitidos > 0) std::snprintf(b, sizeof b, "COHETE INCOMPLETO: %ld CUBITOS EN CHUNKS SIN CARGAR. ESPERA A QUE CARGUE EL MUNDO Y ESCRIBE /COHETE DE NUEVO", omitidos);
+    else std::snprintf(b, sizeof b, "COHETE LISTO: SUBE POR LA TORRE HASTA LA PUERTA, ENTRA A LA CABINA Y PULSA L");
+    g_aviso = b; g_avisoT = glfwGetTime();
+    std::printf("%s | centro bloques x=%.1f z=%.1f gy=%d | %ld cubitos, %d chunks, omitidos %ld\n", b, cxm / (double)SUB, czm / (double)SUB, gy, nCub, (int)sucios.size(), omitidos);
+}
+// llamado cada cuadro con el tiempo real entre cuadros
+static void benchTick(double dtReal, double ahora) {
+    if (g_bench.estado == 1) {          // esperando a que se malle y se ilumine todo; se anota el peor tiron
+        g_bench.peorCarga = std::max(g_bench.peorCarga, dtReal);
+        bool listo = g_meshPend.load() == 0 && g_genPend.load() == 0;
+        for (const ChunkP& c : g_bench.chunks) if (c->state.load() != ST_MESHED) { listo = false; break; }      // todos los chunks de la ciudad ya con su malla y su luz
+        if (ahora - g_bench.t0 > 3.0 && listo) {
+            g_bench.estado = 2; g_bench.tFase = ahora; g_bench.dts.clear();
+            char b[120]; std::snprintf(b, sizeof b, "MALLAS LISTAS EN %.1f S. MIDIENDO 20 S (NO TE MUEVAS)...", ahora - g_bench.t0);
+            g_aviso = b; g_avisoT = ahora;
+            g_bench.t0 = ahora - g_bench.t0;     // t0 pasa a ser el tiempo de carga
+        } else if (ahora - g_bench.t0 > 120.0) { g_bench.estado = 0; g_aviso = "PRUEBA CANCELADA (LAS MALLAS TARDARON MAS DE 2 MIN)"; g_avisoT = ahora; }
+    } else if (g_bench.estado == 2) {
+        g_bench.dts.push_back((float)dtReal);
+        static const bool sinGiro = std::getenv("PRUEBA_CIUDAD") && std::getenv("PRUEBA_CIUDAD")[0] == '2';
+        if (!sinGiro) g_j.yaw += (float)(6.2831853 / 20.0 * dtReal);          // giro completo en 20 s
+        g_avisoT = ahora;
+        if (ahora - g_bench.tFase >= 20.0) {
+            std::vector<float> v = g_bench.dts;
+            std::sort(v.begin(), v.end());
+            double suma = 0; for (float d : v) suma += d;
+            double prom = v.empty() ? 0 : v.size() / suma;
+            double p99 = v.empty() ? 0 : 1.0 / v[std::min(v.size() - 1, (size_t)(v.size() * 0.99))];
+            double peor = v.empty() ? 0 : v.back() * 1000.0;
+            char b[300];
+            std::snprintf(b, sizeof b, "RESULTADO: %.0f FPS PROMEDIO | 1%% PEORES: %.0f FPS | PEOR CUADRO: %.1f MS | MALLAS: %.1f S", prom, p99, peor, g_bench.t0);
+            g_aviso = b; g_avisoT = ahora;
+            FILE* f = std::fopen("rendimiento.txt", "a");
+            if (f) {
+                std::fprintf(f, "SUB=%d | %d LED, %d cubitos, %d chunks | FPS promedio %.1f | 1%% peores %.1f | peor cuadro %.1f ms | peor tiron al construir %.1f ms | mallado %.1f s\n",
+                             SUB, g_bench.nLed, g_bench.nCub, g_bench.nChunks, prom, p99, peor, g_bench.peorCarga * 1000.0, g_bench.t0);
+                std::fclose(f);
+            }
+            std::printf("%s\n", b);
+            g_bench.estado = 0;
+        }
+    }
+}
+
 static int juego_main() {
     if (!glfwInit()) { std::fprintf(stderr, "No se pudo iniciar GLFW\n"); return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -2544,6 +3564,7 @@ static int juego_main() {
     GLuint progLod = programa(VLOD_SRC, FLOD_SRC);
     GLuint progCielo = programa(VC_SRC, FC_SRC);
     GLuint progNube = programa(VN_SRC, FN_SRC);
+    GLuint progNube2 = programa(VN2_SRC, FN2_SRC);
     GLuint vaoVacio, vaoN, vboN;
     glGenVertexArrays(1, &vaoVacio);
     glGenVertexArrays(1, &vaoN);
@@ -2569,6 +3590,10 @@ static int juego_main() {
     GLuint vaoL, vboL;
     glGenVertexArrays(1, &vaoL);
     glGenBuffers(1, &vboL);
+    GLuint progClima = programa(VW_SRC, FW_SRC), vaoW, vboW;
+    glGenVertexArrays(1, &vaoW);
+    glGenBuffers(1, &vboW);
+    std::vector<float> climaV;
 
     auto subirHud = [&](int fbw, int fbh) {
         glDisable(GL_DEPTH_TEST);
@@ -2659,6 +3684,8 @@ static int juego_main() {
     bool jugadorCargado = cargarJugador();
     if (redSpawn && g_red.hayAnfitrionPos) { g_j.p = {g_red.spawn[0] + 1.5, g_red.spawn[1] + 0.5, g_red.spawn[2]}; g_j.v = {0, 0, 0}; g_j.volar = false; }
     else vehCargar();
+    ckCargarInfo();
+    if (const char* cm_ = std::getenv("CK_MULT")) g_ckMult = std::max(1.0, std::atof(cm_));   // (pruebas)
     if (const char* ey = std::getenv("RED_YAW")) g_j.yaw = std::atof(ey);   // (pruebas)
     g_red.dirMundo = g_dir; g_red.semilla = g_semilla;
     g_red.aplicar = redRecibirEdits;
@@ -2669,9 +3696,10 @@ static int juego_main() {
         else std::printf("RED: %s\n", g_red.error.c_str());
     }
     if (const char* eh = std::getenv("HORA")) g_hora = std::atof(eh);   // (pruebas)
+    if (const char* ec = std::getenv("CLIMA")) { g_climaE = std::atoi(ec) % 5; g_climaFijo = true; g_clN = g_clP = g_clT = g_clF = -1; g_rayoSig = 0; }   // (pruebas) clima fijo, ya al maximo
     if (const char* te = std::getenv("TELE")) {   // (pruebas) TELE=x,z[,yaw[,alto]]: aparecer en esas coordenadas
         double tx = 0, tz = 0, ty = 0, ta = 5.0; std::sscanf(te, "%lf,%lf,%lf,%lf", &tx, &tz, &ty, &ta);
-        g_j.p = {tx, alturaTerreno(tx, tz) + ta, tz}; g_j.yaw = ty; g_j.pitch = -0.15; g_j.v = {0, 0, 0};
+        g_j.p = {tx, alturaTerreno(tx, tz) + ta, tz}; g_j.yaw = ty; g_j.pitch = std::getenv("PITCH") ? std::atof(std::getenv("PITCH")) : -0.15; g_j.v = {0, 0, 0};
     }
     if (const char* sv = std::getenv("SURVIVAL")) {   // (pruebas) survival con materiales
         g_survival = true; g_spawnOk = true; g_spawnS[0] = g_j.p.x; g_spawnS[1] = g_j.p.y; g_spawnS[2] = g_j.p.z; g_j.volar = false;
@@ -2689,7 +3717,7 @@ static int juego_main() {
         g_tac.fbw = g_fbW; g_tac.fbh = g_fbH;
         g_tac.ui = g_menu || g_pausa || !g_capturado;
         g_tac.uiJuego = g_menu || g_pausa;
-        g_tac.pil = g_veh.activo && g_veh.pilotando;
+        g_tac.pil = (g_veh.activo && g_veh.pilotando) || g_ck.activo;
         g_tac.extra = g_material == ID_SPRAY || g_material == RUEDA;
         g_tac.volando = g_j.volar;
         glfwPollEvents();
@@ -2697,10 +3725,33 @@ static int juego_main() {
         if (A_pausado) { A_pausado = false; g_guardarYa = true; }      // al pasar a segundo plano se guarda
 #endif
         double ahora = glfwGetTime();
+        double dtReal = ahora - tAnterior;
         double dt = std::min(0.05, ahora - tAnterior);
         tAnterior = ahora;
+        if (std::getenv("LUNA_TEST") && frame == 20) g_lunaPend = true;       // (pruebas) directo al mundo lunar
+        if (g_pedirCiudad || (std::getenv("PRUEBA_CIUDAD") && frame == 250)) { g_pedirCiudad = false; construirCiudad(); }
+        if (g_pedirLanzar || (std::getenv("PRUEBA_LANZAR") && frame == std::atoi(std::getenv("PRUEBA_LANZAR")))) { g_pedirLanzar = false; ckLanzar(); }
+        if (g_pedirCohete || (std::getenv("PRUEBA_COHETE") && frame == std::atoi(std::getenv("PRUEBA_COHETE")))) { g_pedirCohete = false; construirCohete(); }
+        if (g_bench.estado) benchTick(dtReal, ahora);
         frame++; fpsCuenta++;
 
+        // ---- v59: cambio al mundo de la Luna (se vacian los chunks de la Tierra y se generan los lunares)
+        if (g_lunaPend) {
+            g_lunaPend = false;
+            if (g_red.activo()) { aviso("LA LUNA NO ESTA DISPONIBLE EN RED"); g_ck.esperaLuna = false; }
+            else if (!g_modoLuna) {
+                guardarTodosLosSucios(); guardarJugador(); vehGuardar();
+                for (auto& kv : g_mapa) { Chunk& ch = *kv.second; ch.viva.store(false); std::lock_guard<std::mutex> lk(ch.mtx); ch.gOp.liberar(); ch.gAg.liberar(); ch.gLuz.liberar(); }
+                g_mapa.clear();
+                g_lodOnAntes = g_lodOn;
+                if (g_lodOn) { lodLiberarTodo(); g_lodOn = false; }
+                g_dirTierra = g_dir; g_dir = g_dir + "/luna";
+                { std::error_code ec0; std::filesystem::create_directories(g_dir, ec0); }
+                g_modoLuna = true; cargando = true;
+                if (g_ck.activo) ckLunaTeleport();
+                else { g_j.p = {0.5, alturaLuna(0.0, 0.0) + 2.0, 0.5}; g_j.v = {0, 0, 0}; g_j.volar = false; g_vehCinematico = false; aviso("ESTAS EN LA LUNA (PRUEBA)"); }
+            }
+        }
         // ---- carga y descarga de chunks
         int pcx = divPiso((int)std::floor(g_j.p.x * SUB), CS), pcz = divPiso((int)std::floor(g_j.p.z * SUB), CS);
         if (frame % 2 == 0) {
@@ -2818,7 +3869,9 @@ static int juego_main() {
         bool conocido = true;
         leerCubito((int)std::floor(g_j.p.x * SUB), (int)std::floor((g_j.p.y - 0.2) * SUB), (int)std::floor(g_j.p.z * SUB), &conocido);
         if (cargando && conocido) cargando = false;
-        const bool pil = g_veh.activo && g_veh.pilotando;
+        const bool pilV = g_veh.activo && g_veh.pilotando;
+        const bool pil = pilV || g_ck.activo;
+        if (!cargando && g_ck.activo && !g_pausa && !g_menu) ckPaso(ventana, std::min(dt, 0.05));
         if (!cargando && g_veh.activo && !g_pausa && !g_menu) {
             vehPaso(ventana, std::min(dt, 0.05));
             if (g_sobreVeh && !pil) g_j.p = vehAmundo(g_L);      // viajas con la avioneta
@@ -2847,14 +3900,22 @@ static int juego_main() {
                 vehCaminar(mov, salto, correr, dt);
             } else {
                 bool enAgua = esAgua(leerCubito((int)std::floor(g_j.p.x * SUB), (int)std::floor((g_j.p.y + 0.9) * SUB), (int)std::floor(g_j.p.z * SUB)));
+                // lava: te hundes despacio, no puedes correr y en survival te quema (2 de dano cada medio segundo)
+                const bool enLava = esLava(leerCubito((int)std::floor(g_j.p.x * SUB), (int)std::floor((g_j.p.y + 0.3) * SUB), (int)std::floor(g_j.p.z * SUB))) ||
+                                    esLava(leerCubito((int)std::floor(g_j.p.x * SUB), (int)std::floor((g_j.p.y + 0.9) * SUB), (int)std::floor(g_j.p.z * SUB)));
+                if (enLava) {
+                    enAgua = true;
+                    static double tQuema = 0;
+                    if (g_survival && glfwGetTime() - tQuema > 0.5) { tQuema = glfwGetTime(); survDano(2.0f); }
+                }
                 double vel = correr ? 7.0 : 4.3;
-                if (enAgua) vel *= 0.6;
+                if (enAgua) vel *= enLava ? 0.35 : 0.6;
                 g_j.v.x = mov.x * vel + g_j.inercia.x;
                 g_j.v.z = mov.z * vel + g_j.inercia.z;
-                g_j.v.y -= (enAgua ? 8.0 : 28.0) * dt;
+                g_j.v.y -= (enAgua ? 8.0 : (g_modoLuna ? 4.7 : 28.0)) * dt;
                 if (g_j.v.y < (enAgua ? -3.0 : -50.0)) g_j.v.y = enAgua ? -3.0 : -50.0;
                 if (salto && enAgua) g_j.v.y = 4.0;
-                else if (salto && g_j.suelo) g_j.v.y = 9.0;
+                else if (salto && g_j.suelo) g_j.v.y = g_modoLuna ? 5.2 : 9.0;
                 if (g_veh.activo && chocaVeh(g_j.p.x, g_j.p.y, g_j.p.z) && !chocaMundo(g_j.p.x, g_j.p.y, g_j.p.z)) {   // el vehiculo subio y te alcanzo: te empuja hacia arriba
                     for (int n = 0; n < 40 && chocaVeh(g_j.p.x, g_j.p.y, g_j.p.z); n++) g_j.p.y += 0.05;
                     g_j.suelo = true; g_j.v.y = 0;
@@ -2895,7 +3956,8 @@ static int juego_main() {
         V3 mira = {std::cos(g_j.pitch) * std::sin(g_j.yaw), std::sin(g_j.pitch), -std::cos(g_j.pitch) * std::cos(g_j.yaw)};
         V3 cam = {g_j.p.x, g_j.p.y + g_j.ojo, g_j.p.z};
         V3 camUp = {0, 1, 0};
-        if (pil) vehCamara(mira, cam, camUp);
+        if (g_ck.activo) ckCamara(mira, cam, camUp);
+        else if (pil) vehCamara(mira, cam, camUp);
         int fbw, fbh;
         glfwGetFramebufferSize(ventana, &fbw, &fbh);
         g_fbW = fbw; g_fbH = fbh;
@@ -2905,6 +3967,30 @@ static int juego_main() {
         matPerspectiva(proy, 1.22f, (float)fbw / fbh, 0.05f, g_lodOn ? 1500.0f : 800.0f);
         matVista(vista, mira, camUp);
         matMul(vp, proy, vista);
+        g_ckM.ok = g_ck.activo && g_ck.fase == 2 && !g_modoLuna;
+        if (g_ckM.ok) {      // marcadores en pantalla: la Luna y hacia donde apunta la proa
+            V3 mr = ckLunaRel(cam);
+            double dm = std::sqrt(mr.x * mr.x + mr.y * mr.y + mr.z * mr.z);
+            V3 dM = mr * (1.0 / std::max(1.0, dm));
+            V3 f_, r_, u_; vehBase(g_ck.e2, f_, r_, u_);
+            g_ckM.ang = std::acos(std::max(-1.0, std::min(1.0, u_.x * dM.x + u_.y * dM.y + u_.z * dM.z)));
+            g_ckM.dist = dm - CK_LUNA_R;
+            auto proy2 = [&](V3 d, float& sx_, float& sy_) -> bool {
+                float px = (float)(d.x * 1000.0), py = (float)(d.y * 1000.0), pz = (float)(d.z * 1000.0);
+                float cx_ = vp[0] * px + vp[4] * py + vp[8] * pz + vp[12], cy_ = vp[1] * px + vp[5] * py + vp[9] * pz + vp[13], cw = vp[3] * px + vp[7] * py + vp[11] * pz + vp[15];
+                float inv = 1.0f / (std::fabs(cw) > 1e-4f ? cw : 1e-4f);
+                float nx = cx_ * inv, ny = cy_ * inv;
+                if (cw < 0) { nx = -nx; ny = -ny; }                   // detras: se marca el borde por el lado contrario
+                float m = std::max(std::fabs(nx), std::fabs(ny));
+                bool dentro = cw > 0 && m < 0.94f;
+                if (!dentro) { float k_ = 0.90f / std::max(0.001f, m); nx *= k_; ny *= k_; }
+                sx_ = (nx * 0.5f + 0.5f) * fbw; sy_ = (1.0f - (ny * 0.5f + 0.5f)) * fbh;
+                return dentro;
+            };
+            g_ckM.lDentro = proy2(dM, g_ckM.lx, g_ckM.ly);
+            g_ckM.pDentro = proy2(u_, g_ckM.px, g_ckM.py);
+            { V3 ps = norm(mr + ckSolEsp() * CK_LUNA_R); g_ckM.sDentro = proy2(ps, g_ckM.sx, g_ckM.sy); }      // el punto de la Luna donde el sol cae de frente
+        }
 
         // ---- romper / poner
         Golpe golpe;
@@ -2913,10 +3999,14 @@ static int juego_main() {
         bool der = !pil && !g_chat && g_capturado && glfwGetMouseButton(ventana, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
         g_golpea = izq || der;
         g_redEnviar = true;
-        if (g_pedirG) { g_pedirG = false; if (pil) vehSubirBajar(); else if (g_veh.activo) vehSubirBajar(); else if (golpe.hay) vehEnsamblar(golpe.x, golpe.y, golpe.z); else aviso("MIRA UNA PIEZA DEL VEHICULO Y PULSA G"); if (g_veh.activo) g_guardarYa = true; }
+        if (g_pedirG) { g_pedirG = false; if (g_ck.activo) {} else if (pilV) vehSubirBajar(); else if (g_veh.activo) vehSubirBajar(); else if (golpe.hay) vehEnsamblar(golpe.x, golpe.y, golpe.z); else aviso("MIRA UNA PIEZA DEL VEHICULO Y PULSA G"); if (g_veh.activo) g_guardarYa = true; }
         if (g_pedirH) { g_pedirH = false; if (g_veh.activo && !g_veh.pilotando) { vehDesarmar(); g_guardarYa = true; } }
         double cdAcc = 0.18;
         if (g_survival && izq && golpe.hay) cdAcc = survCooldown(leerCubito(golpe.x, golpe.y, golpe.z), g_material);
+        if (golpe.hay && (izq || der) && g_material == ANTORCHA && (!g_survival || g_inv[ANTORCHA] > 0) && esTnt(leerCubito(golpe.x, golpe.y, golpe.z)) && ahora - tAccion > 0.4) {
+            tAccion = ahora;                      // antorcha + clic sobre TNT = encender (no rompe ni pone nada)
+            tntEncender(golpe.x, golpe.y, golpe.z, ahora, 3.0);
+        } else
         if (golpe.hay && (izq || der) && !(der && !izq && (g_material < 0 || esHerr(g_material))) && ahora - tAccion > cdAcc) {
             tAccion = ahora;
             std::vector<ChunkP> sucios;
@@ -2955,7 +4045,7 @@ static int juego_main() {
                         escribirCubito(x, y, z, RUEDA, sucios);
                     }
                 }
-            } else if (esHerr(g_material) || g_material < 0) {
+            } else if (esHerr(g_material) || g_material < 0 || g_material == ID_POLVORA) {
                 // las herramientas y la mano vacia no ponen nada
             } else {
                 int x0, y0, z0, n;
@@ -2999,6 +4089,16 @@ static int juego_main() {
         }
         if (std::getenv("DBGINV") && frame % 5 == 0) std::printf("INV cm=%.1f vy=%.1f suelo=%d dt=%.4f f=%d arena=%d tierra=%d pasto=%d piedra=%d pico_p=%d vida=%.1f y=%.1f\n", g_caidaMax, g_j.v.y, (int)g_j.suelo, dt, frame, g_inv[ARENA], g_inv[TIERRA], g_inv[PASTO], g_inv[PIEDRA], g_inv[HERR_BASE + 1], g_vida, g_j.p.y);
         if (const char* fc2 = std::getenv("CAIDA")) if (frame == std::atoi(fc2)) g_j.p.y += 14;   // (pruebas) soltarte desde 14 bloques
+        if (const char* pm = std::getenv("PRUEBA_MENU")) if (frame == 40) { abrirMenu(ventana); g_menuPag = std::atoi(pm); menuReconstruir(); }   // (pruebas) abre el menu en esa pagina
+        if (const char* pt = std::getenv("PRUEBA_TNT")) if (frame == std::atoi(pt)) {   // (pruebas) cubo de TNT delante, encendido a 1 s
+            std::vector<ChunkP> su;
+            int bx = (int)std::floor((g_j.p.x + std::sin(g_j.yaw) * 7.0) * SUB), bz = (int)std::floor((g_j.p.z - std::cos(g_j.yaw) * 7.0) * SUB);
+            int gy = (int)std::floor(alturaTerreno(bx / (double)SUB, bz / (double)SUB) * SUB);
+            for (int dy = 0; dy < 6; dy++) for (int dz = 0; dz < 6; dz++) for (int dx = 0; dx < 6; dx++) escribirCubito(bx + dx, gy + dy, bz + dz, TNT, su);
+            for (auto& c : su) remallarYa(c);
+            tntEncender(bx, gy, bz, ahora, std::getenv("TNT_LARGO") ? 1.0 : 100000.0);
+            std::printf("PRUEBA_TNT en %d %d %d\n", bx, gy, bz);
+        }
         if (std::getenv("PRUEBA_FOSO2") && frame == 250) {   // (pruebas) pozo y tunel excavados dentro del terreno, con una antorcha
             std::vector<ChunkP> su;
             int bx = (int)std::floor(g_j.p.x * SUB) + 20, bz = (int)std::floor(g_j.p.z * SUB);
@@ -3093,6 +4193,7 @@ static int juego_main() {
         if (const char* fg = std::getenv("PRUEBA_RED_G2")) if (frame == std::atoi(fg) && g_veh.activo) g_pedirG = true;                                       // (pruebas) bajar
         if (std::getenv("PRUEBA_RED_VEH") && frame % 100 == 0 && frame >= 200)   // (pruebas) estado de la avioneta compartida
             std::printf("VEHRED frame %d activo=%d pil=%d pilotoRed=%d celdas=%d pos=%.1f %.1f %.1f gas=%.2f cinem=%d\n", frame, g_veh.activo ? 1 : 0, g_veh.pilotando ? 1 : 0, g_veh.pilotoRed, (int)g_veh.celdas.size(), g_veh.p.x, g_veh.p.y, g_veh.p.z, g_veh.gas, g_vehCinematico ? 1 : 0);
+        if (const char* ps = std::getenv("PAUSA")) if (frame == 30) { g_pausa = true; g_pausaSub = std::atoi(ps) == 2 ? 1 : 0; }   // (pruebas)
         if (std::getenv("PRUEBA_AGUA") && frame == 250) {   // (pruebas) plataforma con una fuente encima: debe repartirse y caer por los bordes
             std::vector<ChunkP> su;
             int bx = (int)std::floor(g_j.p.x * SUB) + 14, bz = (int)std::floor(g_j.p.z * SUB);
@@ -3105,11 +4206,13 @@ static int juego_main() {
         }
         // ---- agua que fluye
         if (!cargando && ahora - tAgua >= 0.10) { tAgua = ahora; tickAgua(); }
+        if (!cargando && !g_tnt.empty()) tntActualizar(ahora);
 
         // ---- dibujo
         glViewport(0, 0, fbw, fbh);
         // hora del dia: 0 amanecer, 0.25 mediodia, 0.5 atardecer, 0.75 medianoche
         g_hora = std::fmod(g_hora + dt / 600.0, 1.0);
+        if (g_modoLuna) g_hora = 0.09;                 // Luna: sol fijo y bajo (sombras largas)
         float sh = (float)std::sin(g_hora * 6.2831853);
         float dia = std::max(0.0f, std::min(1.0f, (sh + 0.25f) / 0.60f));
         dia = dia * dia * (3.0f - 2.0f * dia);
@@ -3117,6 +4220,95 @@ static int juego_main() {
         float cielo[3] = {0.015f + 0.535f * dia, 0.02f + 0.73f * dia, 0.06f + 0.89f * dia};
         float ocaso = std::exp(-(sh / 0.28f) * (sh / 0.28f)) * 0.45f;
         cielo[0] += (0.95f - cielo[0]) * ocaso; cielo[1] += (0.50f - cielo[1]) * ocaso; cielo[2] += (0.30f - cielo[2]) * ocaso;
+        // ---- clima: maquina de estados, techo encima, color del cielo, niebla y rayos
+        float clK = 0.0f, clFog = 0.0f, rayoF = 0.0f, climaAlt = 1.0f;
+        {
+            if (!g_climaFijo && !cargando) {
+                g_climaT -= dt;
+                if (g_climaT <= 0) {
+                    float r = climaRand(); int n = g_climaE;
+                    if (g_climaE == 0) n = r < 0.35f ? 1 : r < 0.65f ? 2 : r < 0.75f ? 3 : 4;
+                    else if (g_climaE == 2 && r < 0.30f) n = 3;
+                    else if (r < 0.60f) n = 0;   // vuelve a despejar
+                    else n = 1 + (int)(climaRand() * 4.0f) % 4;
+                    if (n == g_climaE) n = 0;
+                    g_climaE = n; g_climaT = 80.0 + climaRand() * 160.0;
+                }
+            }
+            static const float oN[5] = {0.0f, 0.65f, 0.85f, 1.0f, 0.35f}, oP[5] = {0, 0, 0.75f, 1.0f, 0}, oT[5] = {0, 0, 0, 1.0f, 0}, oF[5] = {0, 0.12f, 0.30f, 0.40f, 1.0f};
+            auto acerca = [&](float& v, float obj, float vel) {
+                if (v < -0.5f) v = obj;
+                else v += std::max(-vel * (float)dt, std::min(vel * (float)dt, obj - v));
+            };
+            acerca(g_clN, oN[g_climaE], 0.05f); acerca(g_clP, oP[g_climaE], 0.06f);
+            acerca(g_clT, oT[g_climaE], 0.05f); acerca(g_clF, oF[g_climaE], 0.04f);
+            static int cubFr = 0; static float cubObj = 0;
+            if (cubFr++ % 6 == 0) {            // hay algo encima (techo, cueva, arbol)?
+                int cx0 = (int)std::floor(cam.x * SUB), cy0 = (int)std::floor(cam.y * SUB), cz0 = (int)std::floor(cam.z * SUB);
+                cubObj = 0;
+                for (int k = 2; k <= 100; k++) {
+                    uint8_t t = leerCubito(cx0, cy0 + k, cz0);
+                    if (t != AIRE && !esAgua(t) && !esPlanta(t)) { cubObj = 1; break; }
+                }
+            }
+            acerca(g_clCub, cubObj, 1.5f);
+            static const bool forzarNieve = std::getenv("NIEVE") != nullptr;   // (pruebas)
+            static int frio = 0, frioFr = 0;
+            if (frioFr++ % 20 == 0) {    // bioma frio bajo el jugador: nieve en vez de lluvia
+                float wb[BIO_N]; int dm = biomaPesos(cam.x, cam.z, wb);
+                frio = (dm == BIO_TUNDRA || dm == BIO_GLACIAR || dm == BIO_TAIGA || dm == BIO_PICOS || (dm == BIO_OCEANO && temp01(cam.x, cam.z) < 0.2f)) ? 1 : 0;
+            }
+            acerca(g_clNieve, (forzarNieve || frio) ? 1.0f : 0.0f, forzarNieve ? 5.0f : 0.30f);
+            // rayos
+            static const bool testRayo = std::getenv("RAYOTEST") != nullptr;   // (pruebas)
+            if (testRayo) g_rayoSig = 0;
+            if (g_clT > 0.6f && !cargando && ahora > g_rayoSig) {
+                g_rayoT = ahora; g_rayoSig = ahora + 4.0 + climaRand() * 13.0;
+                float a = climaRand() * 6.2831853f, d = 45.0f + climaRand() * 110.0f;
+                float gx = (float)cam.x + std::cos(a) * d, gz = (float)cam.z + std::sin(a) * d;
+                float gy = (float)alturaTerreno(gx, gz), top = (float)(110.0 + OFFY + 10.0);
+                g_rayoPts.clear();
+                const int NS = 14;
+                float px = gx + (climaRand() - 0.5f) * 30.0f, pz = gz + (climaRand() - 0.5f) * 30.0f;
+                for (int i = 0; i <= NS; i++) {
+                    float f = (float)i / NS;
+                    float jx = (i == 0 || i == NS) ? 0.0f : (climaRand() - 0.5f) * 14.0f, jz = (i == 0 || i == NS) ? 0.0f : (climaRand() - 0.5f) * 14.0f;
+                    float x = gx + (px - gx) * (1.0f - f) + jx, z = gz + (pz - gz) * (1.0f - f) + jz;
+                    g_rayoPts.push_back(x); g_rayoPts.push_back(top + (gy - top) * f); g_rayoPts.push_back(z);
+                }
+            }
+            double dr = ahora - g_rayoT;
+            if (dr >= 0 && dr < 0.6) rayoF = (dr < 0.09 ? 1.0f : dr < 0.15 ? 0.15f : dr < 0.30 ? 0.85f * (float)(1.0 - (dr - 0.15) / 0.15) + 0.1f : 0.1f * (float)(1.0 - (dr - 0.3) / 0.3));
+            float sobre = std::max(0.0f, std::min(1.0f, ((float)cam.y - 230.0f) / 90.0f)); sobre = sobre * sobre * (3.0f - 2.0f * sobre);
+            climaAlt = 1.0f - sobre;                  // por encima de las nubes (y mas arriba) el clima ya no afecta
+            clK = std::max(0.95f * g_clN, 0.90f * g_clF) * climaAlt;
+            clFog = std::max(g_clF, std::max(0.50f * g_clP, 0.30f * g_clN)) * climaAlt;
+            rayoF *= climaAlt;
+            if (clK > 0.001f) {
+                const float lum = (0.10f + 0.90f * dia) * (0.80f - 0.38f * g_clT);
+                const float gris[3] = {0.60f * lum + 0.04f, 0.64f * lum + 0.05f, 0.70f * lum + 0.07f};
+                for (int k = 0; k < 3; k++) cielo[k] += (gris[k] - cielo[k]) * clK;
+                skyMul *= 1.0f - 0.32f * clK - 0.22f * g_clT * climaAlt;
+            }
+            if (rayoF > 0.001f) { for (int k = 0; k < 3; k++) cielo[k] += (1.0f - cielo[k]) * 0.55f * rayoF; skyMul = std::min(1.0f, skyMul + 0.55f * rayoF); }
+            if (g_modoLuna) { clK = 0; clFog = 0; rayoF = 0; g_clN = g_clP = g_clT = g_clF = 0; g_clNieve = 0; cielo[0] = cielo[1] = cielo[2] = 0.0f; skyMul = 1.0f; }   // sin atmosfera
+        }
+        // ---- bajo el agua: niebla azul que se oscurece y se acorta con la profundidad (mar profundo)
+        const bool camAgua = esAgua(leerCubito((int)std::floor(cam.x * SUB), (int)std::floor(cam.y * SUB), (int)std::floor(cam.z * SUB)));
+        float aguaFogA = -1.0f, aguaFogB = -1.0f;
+        if (camAgua) {
+            float pf = (float)std::max(0.0, WATER_LEVEL - cam.y) / 42.0f;
+            pf = std::min(1.0f, pf); pf = pf * pf * (3.0f - 2.0f * pf);
+            const float luzD = 0.22f + 0.78f * dia;
+            const float somero[3] = {0.07f, 0.38f, 0.55f}, hondo[3] = {0.008f, 0.045f, 0.115f};
+            for (int k = 0; k < 3; k++) cielo[k] = (somero[k] + (hondo[k] - somero[k]) * pf) * luzD;
+            aguaFogA = 1.0f; aguaFogB = 120.0f - 92.0f * pf;
+        }
+        if (!camAgua && clFog > 0.02f) {      // niebla del clima: acorta la distancia de vision
+            const float bB = (float)(g_lodOn ? LOD_FOG_MAX : VIEW_BLOCKS) * 0.97f, bA = (float)(g_lodOn ? LOD_FOG_MAX * 0.55 : VIEW_BLOCKS * 0.60);
+            aguaFogB = std::max(55.0f, bB * (1.0f - 0.93f * clFog));
+            aguaFogA = std::max(2.0f, std::min(aguaFogB * 0.8f, bA * (1.0f - clFog)));
+        }
         // ---- graficos mejorados: sombras de sol (mapa de profundidad desde el sol) y escena en un framebuffer HDR
         const bool gfx = g_graf && pp.ok;
         float sombraOn = 0.0f, solF = 0.0f;
@@ -3129,6 +4321,8 @@ static int juego_main() {
             solV[0] = ax / al; solV[1] = ay / al; solV[2] = az / al;
             float e = std::max(0.0f, std::min(1.0f, solV[1] * 4.0f));
             solF = e * e * (3.0f - 2.0f * e);
+            if (g_modoLuna) { solV[0] = (float)g_solLuna.x; solV[1] = (float)g_solLuna.y; solV[2] = (float)g_solLuna.z; float e2_ = std::max(0.0f, std::min(1.0f, solV[1] * 4.0f)); solF = e2_ * e2_ * (3.0f - 2.0f * e2_); }
+            solF *= 1.0f - 0.9f * clK;      // nublado: sombras suaves o ninguna
         }
         if (gfx) {
             ppTamano(pp, fbw, fbh);
@@ -3163,11 +4357,22 @@ static int juego_main() {
                 glUniformMatrix4fv(uSVPs, 1, GL_FALSE, SVP);
                 glUniform1f(uVSs, (float)VS);
                 const double tamS = CS * VS;
+                std::unordered_map<int64_t, float> sombSup;       // superficie real 3x3 por columna (una vez por pasada)
+                const int pcxS = divPiso((int)std::floor(cam.x), 16), pczS = divPiso((int)std::floor(cam.z), 16);
                 for (auto& kv : g_mapa) {
                     Chunk* c = kv.second.get();
                     if (c->state.load(std::memory_order_acquire) == ST_GEN || !c->gOp.n) continue;
                     double ddx = (c->cx + 0.5) * tamS - cam.x, ddz = (c->cz + 0.5) * tamS - cam.z;
                     if (std::fabs(ddx) > SOMB_R + tamS || std::fabs(ddz) > SOMB_R + tamS) continue;
+                    // lo enterrado bajo la superficie no puede dar sombra a nada visible (salvo junto al jugador, donde se excava)
+                    if (std::abs(c->cx - pcxS) > 3 || std::abs(c->cz - pczS) > 3) {
+                        const int64_t ck = colKey(c->cx, c->cz);
+                        auto is = sombSup.find(ck);
+                        float sm;
+                        if (is != sombSup.end()) sm = is->second;
+                        else { sm = supMin3(c->cx, c->cz); sombSup[ck] = sm; }
+                        if (sm > -1e8f && (double)(c->cy + 1) * tamS < sm - 2.0) continue;
+                    }
                     glUniform3f(uRels, (float)(c->cx * tamS - cam.x), (float)(c->cy * tamS - cam.y), (float)(c->cz * tamS - cam.z));
                     glBindVertexArray(c->gOp.vao);
                     glDrawElements(GL_TRIANGLES, c->gOp.n, GL_UNSIGNED_INT, (const void*)0);
@@ -3187,6 +4392,7 @@ static int juego_main() {
             float th = (float)(g_hora * 6.2831853);
             float sx = std::cos(th), sy = std::sin(th), sz = 0.30f, sl = std::sqrt(sx * sx + sy * sy + sz * sz);
             float zen[3] = {0.0f + 0.22f * dia, 0.005f + 0.42f * dia, 0.03f + 0.82f * dia};
+            for (int k = 0; k < 3; k++) zen[k] += (cielo[k] * 0.88f - zen[k]) * clK;
             glDisable(GL_DEPTH_TEST);
             glDisable(GL_CULL_FACE);
             glUseProgram(progCielo);
@@ -3195,10 +4401,69 @@ static int juego_main() {
             glUniform3f(glGetUniformLocation(progCielo, "uRight"), (float)rg.x, (float)rg.y, (float)rg.z);
             glUniform3f(glGetUniformLocation(progCielo, "uUp"), (float)up.x, (float)up.y, (float)up.z);
             glUniform2f(glGetUniformLocation(progCielo, "uTan"), tanX, tanY);
-            glUniform3f(glGetUniformLocation(progCielo, "uHor"), cielo[0], cielo[1], cielo[2]);
-            glUniform3f(glGetUniformLocation(progCielo, "uZen"), zen[0], zen[1], zen[2]);
-            glUniform3f(glGetUniformLocation(progCielo, "uSun"), sx / sl, sy / sl, sz / sl);
-            glUniform1f(glGetUniformLocation(progCielo, "uNoche"), 1.0f - dia);
+            float ea = std::max(0.0f, std::min(1.0f, ((float)cam.y - 250.0f) / 1350.0f)); ea = ea * ea * (3.0f - 2.0f * ea);
+            if (g_modoLuna) ea = 1.0f;
+            const float atmo = 1.0f - ea;                     // 1 = aire normal, 0 = espacio
+            glUniform3f(glGetUniformLocation(progCielo, "uHor"), cielo[0] * atmo, cielo[1] * atmo, cielo[2] * atmo);
+            glUniform3f(glGetUniformLocation(progCielo, "uHaze"), cielo[0], cielo[1], cielo[2]);
+            glUniform1f(glGetUniformLocation(progCielo, "uAlt"), g_modoLuna ? 3000.0f : (float)cam.y);
+            double tEx, tEz; ckTierraXZ(cam, tEx, tEz);        // centro de la Tierra (bajo la camara, o fijo si ya saliste rumbo a la Luna)
+            if (g_modoLuna) {     // desde la Luna la Tierra es una esfera enorme en el cielo (altura 35 grados, al lado contrario del sol)
+                glUniform3f(glGetUniformLocation(progCielo, "uOc"), (float)(-g_tierraM.x), (float)(-g_tierraM.y), (float)(-g_tierraM.z));
+            } else glUniform3f(glGetUniformLocation(progCielo, "uOc"), (float)(cam.x - tEx), (float)(cam.y + CK_RP), (float)(cam.z - tEz));
+            glUniform2f(glGetUniformLocation(progCielo, "uCamXZ"), (float)std::fmod(tEx, 60000.0), (float)std::fmod(tEz, 60000.0));
+            {
+                V3 mr = ckLunaRel(cam);
+                glUniform3f(glGetUniformLocation(progCielo, "uLunaC"), (float)mr.x, (float)mr.y, (float)mr.z);
+                glUniform1f(glGetUniformLocation(progCielo, "uLunaR"), cam.y > 400.0 ? (float)CK_LUNA_R : 0.0f);
+            }
+            glUniform1f(glGetUniformLocation(progCielo, "uEsp"), ea);
+            glUniform1f(glGetUniformLocation(progCielo, "uLunaOn"), ea);
+            glUniform1f(glGetUniformLocation(progCielo, "uAtmoF"), g_modoLuna ? 0.0f : (g_espAtard ? 1.0f : atmo));
+            {   // mapa de este mundo para la esfera de la Tierra
+                static GLuint texMapa = 0;
+                if (cam.y > 200.0) {
+                    if (g_mapaEstado.load() == 2) {
+                        if (!texMapa) { glGenTextures(1, &texMapa); }
+                        glActiveTexture(GL_TEXTURE0 + 15);
+                        glBindTexture(GL_TEXTURE_2D, texMapa);
+                        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, MAPA_N, MAPA_N, 0, GL_RGBA, GL_UNSIGNED_BYTE, g_mapaBuf.data());
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                        glActiveTexture(GL_TEXTURE0);
+                        g_mapaTiene = true; g_mapaEstado.store(0);
+                    }
+                    double dd = std::max(std::fabs(tEx - g_mapaCx), std::fabs(tEz - g_mapaCz));
+                    if (g_mapaEstado.load() == 0 && (!g_mapaTiene || dd > 5000.0)) {
+                        g_mapaEstado.store(1);
+                        std::thread(mapaCalcular, tEx, tEz, g_semilla).detach();
+                    }
+                }
+                if (g_mapaTiene) g_mapaOk = std::min(1.0f, g_mapaOk + (float)dt * 0.8f);
+                if (g_mapaTiene && texMapa) {
+                    glActiveTexture(GL_TEXTURE0 + 15);
+                    glBindTexture(GL_TEXTURE_2D, texMapa);
+                    glActiveTexture(GL_TEXTURE0);
+                    glUniform1i(glGetUniformLocation(progCielo, "uMapa"), 15);
+                }
+                glUniform2f(glGetUniformLocation(progCielo, "uMapaOff"), (float)(tEx - g_mapaCx), (float)(tEz - g_mapaCz));
+                glUniform1f(glGetUniformLocation(progCielo, "uMapaOk"), g_mapaTiene ? g_mapaOk : 0.0f);
+            }
+
+            glUniform3f(glGetUniformLocation(progCielo, "uZen"), zen[0] * atmo, zen[1] * atmo, zen[2] * atmo);
+            {
+                V3 su_ = {sx / sl, sy / sl, sz / sl};
+                if (g_modoLuna) su_ = g_solLuna;
+                else g_solHora = norm(su_);
+                glUniform3f(glGetUniformLocation(progCielo, "uSun"), (float)su_.x, (float)su_.y, (float)su_.z);
+            }
+            glUniform1f(glGetUniformLocation(progCielo, "uNoche"), std::max((1.0f - dia) * (1.0f - clK), ea));
+            glUniform1f(glGetUniformLocation(progCielo, "uClima"), clK);
+            glUniform1f(glGetUniformLocation(progCielo, "uTime"), (float)std::fmod(ahora, 4000.0));
+            glUniform1f(glGetUniformLocation(progCielo, "uMejor"), g_cielo ? 1.0f : 0.0f);
             glBindVertexArray(vaoVacio);
             glDrawArrays(GL_TRIANGLES, 0, 3);
         }
@@ -3219,8 +4484,8 @@ static int juego_main() {
             glUseProgram(progLod);
             glUniformMatrix4fv(glGetUniformLocation(progLod, "uVP"), 1, GL_FALSE, vpL);
             glUniform3f(glGetUniformLocation(progLod, "uSky"), cielo[0], cielo[1], cielo[2]);
-            glUniform1f(glGetUniformLocation(progLod, "uFogA"), (float)(LOD_FOG_MAX * 0.55));
-            glUniform1f(glGetUniformLocation(progLod, "uFogB"), (float)(LOD_FOG_MAX * 0.97));
+            glUniform1f(glGetUniformLocation(progLod, "uFogA"), aguaFogA > 0 ? aguaFogA : (float)(LOD_FOG_MAX * 0.55));
+            glUniform1f(glGetUniformLocation(progLod, "uFogB"), aguaFogB > 0 ? aguaFogB : (float)(LOD_FOG_MAX * 0.97));
             glUniform1f(glGetUniformLocation(progLod, "uSkyMul"), skyMul);
             GLint lRel = glGetUniformLocation(progLod, "uRel"), lAlfa = glGetUniformLocation(progLod, "uAlpha");
             std::vector<LodTile*> vis;
@@ -3260,6 +4525,29 @@ static int juego_main() {
             glDisable(GL_BLEND);
             glClear(GL_DEPTH_BUFFER_BIT);
             glEnable(GL_CULL_FACE);
+            // el terreno lejano TAMBIEN tapa: se vuelve a escribir su profundidad (bajada unos bloques) con la proyeccion del mundo real,
+            // asi lo que esta por debajo de el (cuevas y subsuelo de zonas editadas lejanas) queda escondido, como si fuera una pared
+            static const bool lodTapa = std::getenv("NOLODTAPA") == nullptr;
+            if (lodTapa) {
+                glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                glUniformMatrix4fv(glGetUniformLocation(progLod, "uVP"), 1, GL_FALSE, vp);
+                glUniform1f(lAlfa, 1.0f);
+                for (LodTile* t : vis) if (t->n[0]) {
+                    double ts = (double)LOD_N * LOD_CELDA[t->niv];
+                    glUniform3f(lRel, (float)(t->tx * ts - cam.x), (float)(-cam.y - 3.0), (float)(t->tz * ts - cam.z));
+                    glBindVertexArray(t->vao[0]);
+                    glDrawElements(GL_TRIANGLES, t->n[0], GL_UNSIGNED_SHORT, (const void*)0);
+                }
+                glDisable(GL_CULL_FACE);
+                for (LodTile* t : vis) if (t->n[1]) {      // el agua lejana tambien tapa el fondo (oscuro) de los chunks reales que hay debajo
+                    double ts = (double)LOD_N * LOD_CELDA[t->niv];
+                    glUniform3f(lRel, (float)(t->tx * ts - cam.x), (float)(-cam.y - 2.0), (float)(t->tz * ts - cam.z));
+                    glBindVertexArray(t->vao[1]);
+                    glDrawElements(GL_TRIANGLES, t->n[1], GL_UNSIGNED_SHORT, (const void*)0);
+                }
+                glEnable(GL_CULL_FACE);
+                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            }
         }
 
         // planos del frustum (en espacio relativo a la camara)
@@ -3283,9 +4571,13 @@ static int juego_main() {
         glUniform1f(uLMax, (float)LMAX);
         glUniform1f(uLN, (float)LN);
         glUniform1f(uSkyMul, skyMul);
+        glUniform1f(glGetUniformLocation(progMundo, "uTime"), (float)std::fmod(ahora, 4000.0));
+        glUniform1f(glGetUniformLocation(progMundo, "uAguaFx"), (float)g_agua);
+        glUniform1f(glGetUniformLocation(progMundo, "uViento"), g_viento ? 1.0f : 0.0f);
+        glUniform1f(glGetUniformLocation(progMundo, "uBuceo"), esAgua(leerCubito((int)std::floor(cam.x * SUB), (int)std::floor(cam.y * SUB), (int)std::floor(cam.z * SUB))) ? 1.0f : 0.0f);
         glActiveTexture(GL_TEXTURE0);
-        glUniform1f(uFogB, (float)(g_lodOn ? LOD_FOG_MAX : VIEW_BLOCKS) * 0.97f);
-        glUniform1f(uFogA, (float)(g_lodOn ? LOD_FOG_MAX * 0.55 / 0.60 : VIEW_BLOCKS) * 0.60f);
+        glUniform1f(uFogB, aguaFogB > 0 ? aguaFogB : (float)(g_lodOn ? LOD_FOG_MAX : VIEW_BLOCKS) * 0.97f);
+        glUniform1f(uFogA, aguaFogA > 0 ? aguaFogA : (float)(g_lodOn ? LOD_FOG_MAX * 0.55 / 0.60 : VIEW_BLOCKS) * 0.60f);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, pp.texSh);
         glActiveTexture(GL_TEXTURE0);
@@ -3305,7 +4597,7 @@ static int juego_main() {
         static const bool oclOn = std::getenv("NOOCL") == nullptr;
         auto minCol = [&](int cx_, int cz_) -> float {
             int64_t k = colKey(cx_, cz_);
-            if (!g_editCols.empty() && g_editCols.count(k)) return -1e9f;       // columna editada: puede haber tuneles
+            if (!g_editCols.empty() && g_editCols.count(k)) return supMinColumna(cx_, cz_);     // columna editada: su superficie real (con tus cambios)
             auto it = s_colMin.find(k);
             if (it != s_colMin.end()) return it->second;
             float mh = 1e9f;
@@ -3334,6 +4626,7 @@ static int juego_main() {
         std::vector<Chunk*> visibles;
         std::unordered_map<int64_t, bool> colOk;
         std::unordered_map<int64_t, double> colMinH;
+        std::unordered_map<int64_t, float> colSup3;
         const double tam = CS * VS;
         for (auto& kv : g_mapa) {
             Chunk* c = kv.second.get();
@@ -3373,6 +4666,13 @@ static int juego_main() {
                         colMinH[ck] = minH;
                     }
                     if ((double)(c->cy + 1) * CS / SUB < minH - 1.0) continue;
+                    if (!g_editCols.empty() && g_editCols.count(ck)) {      // columna editada: tambien se oculta lo enterrado bajo su superficie REAL (cuevas)
+                        auto is = colSup3.find(ck);
+                        float sm;
+                        if (is != colSup3.end()) sm = is->second;
+                        else { sm = supMin3(c->cx, c->cz); colSup3[ck] = sm; }
+                        if (sm > -1e8f && (double)(c->cy + 1) * CS / SUB < sm - 2.0) continue;
+                    }
                 }
             }
             double mnx = c->cx * tam - cam.x, mny = c->cy * tam - cam.y, mnz = c->cz * tam - cam.z;
@@ -3419,9 +4719,10 @@ static int juego_main() {
             }
         };
         dibujar(false);
-        const float fogAv = (float)(g_lodOn ? LOD_FOG_MAX * 0.55 / 0.60 : VIEW_BLOCKS) * 0.60f, fogBv = (float)(g_lodOn ? LOD_FOG_MAX : VIEW_BLOCKS) * 0.97f;
+        const float fogAv = (aguaFogA > 0 && !camAgua) ? aguaFogA : (float)(g_lodOn ? LOD_FOG_MAX * 0.55 / 0.60 : VIEW_BLOCKS) * 0.60f, fogBv = (aguaFogB > 0 && !camAgua) ? aguaFogB : (float)(g_lodOn ? LOD_FOG_MAX : VIEW_BLOCKS) * 0.97f;
         glDisable(GL_CULL_FACE);
         vehDibujar(vp, cam, solV, solF, skyMul, gfx ? 1.0f : 0.0f, cielo, fogAv, fogBv, false);
+        ckDibujar(vp, cam, solV, solF, skyMul, gfx ? 1.0f : 0.0f, cielo, fogAv, fogBv, false);
         jugDibujar(vp, cam.x, cam.y, cam.z, solV, solF, skyMul, cielo, fogAv, fogBv);
         g_etiquetas.clear();
         for (auto& kv : g_red.rem) if (kv.second.visto) {       // nombres sobre la cabeza
@@ -3437,9 +4738,36 @@ static int juego_main() {
         glDisable(GL_CULL_FACE);
         dibujar(true);
         vehDibujar(vp, cam, solV, solF, skyMul, gfx ? 1.0f : 0.0f, cielo, fogAv, fogBv, true);
+        ckDibujar(vp, cam, solV, solF, skyMul, gfx ? 1.0f : 0.0f, cielo, fogAv, fogBv, true);
 
         // ---- nubes: cajas de 16 bloques a ~110 de altura; la malla se rehace al cruzar de celda, el viento solo la desplaza
-        {
+        if (g_modoLuna) {} else if (g_nubes == 2 && g_graf) {   // graficos mejorados: nubes volumetricas (rayo por la capa, luz del sol y sombra propia)
+            const double NUBE_Y2 = 110.0 + OFFY; const float ESP = 28.0f, RQ = g_lodOn ? 1300.0f : 650.0f;
+            float cn[3] = {0.10f + 0.90f * dia, 0.11f + 0.89f * dia, 0.17f + 0.83f * dia};
+            { float osc = 1.0f - 0.50f * std::max(0.6f * g_clN, g_clT); cn[0] *= osc; cn[1] *= osc; cn[2] *= osc; }
+            float oc2 = std::min(1.0f, ocaso * 1.7f) * (1.0f - clK);       // atardecer: nubes naranjas y rosadas (no verdosas)
+            cn[0] += (1.00f - cn[0]) * oc2 * 0.85f; cn[1] += (0.52f - cn[1]) * oc2; cn[2] += (0.40f - cn[2]) * oc2;
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_CULL_FACE);
+            glDepthMask(GL_FALSE);
+            glUseProgram(progNube2);
+            glUniformMatrix4fv(glGetUniformLocation(progNube2, "uVP"), 1, GL_FALSE, vp);
+            glUniform1f(glGetUniformLocation(progNube2, "uR"), RQ);
+            glUniform1f(glGetUniformLocation(progNube2, "uYm"), (float)(NUBE_Y2 + ESP * 0.5 - cam.y));
+            glUniform1f(glGetUniformLocation(progNube2, "uY0"), (float)(NUBE_Y2 - cam.y));
+            glUniform1f(glGetUniformLocation(progNube2, "uTh"), ESP);
+            glUniform3f(glGetUniformLocation(progNube2, "uCamAbs"), (float)std::fmod(cam.x, 20000.0), (float)cam.y, (float)std::fmod(cam.z, 20000.0));
+            glUniform2f(glGetUniformLocation(progNube2, "uWind"), (float)std::fmod(ahora * 1.6, 20000.0), (float)std::fmod(ahora * 0.45, 20000.0));
+            glUniform3f(glGetUniformLocation(progNube2, "uSun"), solV[0], solV[1], solV[2]);
+            glUniform3f(glGetUniformLocation(progNube2, "uCol"), cn[0], cn[1], cn[2]);
+            glUniform3f(glGetUniformLocation(progNube2, "uSkyF"), cielo[0], cielo[1], cielo[2]);
+            glUniform2f(glGetUniformLocation(progNube2, "uFog"), RQ * 0.30f, RQ * 0.95f);
+            glUniform1f(glGetUniformLocation(progNube2, "uCover"), 0.50f - 0.42f * g_clN);
+            glBindVertexArray(vaoVacio);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glDepthMask(GL_TRUE);
+        } else if (g_nubes >= 1) {
             const double CN = 16.0, NUBE_Y = 110.0 + OFFY, NUBE_ALTO = 5.0;
             const int RN = 20;
             double vx = ahora * 1.6, vz = ahora * 0.45;
@@ -3494,6 +4822,112 @@ static int juego_main() {
                 glBindVertexArray(vaoN);
                 glDrawArrays(GL_TRIANGLES, 0, nubeVerts);
             }
+        }
+        // ---- lluvia, nieve y rayos
+        g_explos.erase(std::remove_if(g_explos.begin(), g_explos.end(), [&](const Explosion& e) { return ahora - e.t0 > 1.8; }), g_explos.end());
+        if ((!camAgua && (g_clP * (1.0f - g_clCub) * climaAlt > 0.01f || rayoF > 0.001f || (ahora - g_rayoT) < 0.6)) || !g_explos.empty()) {
+            const V3 fw_ = norm(mira), rg_ = norm(cruz(fw_, camUp)), up_ = cruz(rg_, fw_);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_CULL_FACE);
+            glDepthMask(GL_FALSE);
+            glUseProgram(progClima);
+            glUniformMatrix4fv(glGetUniformLocation(progClima, "uVP"), 1, GL_FALSE, vp);
+            const GLint wCol = glGetUniformLocation(progClima, "uColor");
+            auto subirW = [&](float r, float g, float b, float a) {
+                if (climaV.empty()) return;
+                glUniform4f(wCol, r, g, b, a);
+                glBindVertexArray(vaoW);
+                glBindBuffer(GL_ARRAY_BUFFER, vboW);
+                glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(climaV.size() * sizeof(float)), climaV.data(), GL_DYNAMIC_DRAW);
+                glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 16, (const void*)0);
+                glEnableVertexAttribArray(1); glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 16, (const void*)12);
+                glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(climaV.size() / 4));
+                climaV.clear();
+            };
+            auto quadW = [&](const float* a, const float* b, const float* c, const float* d, float aa, float ab, float ac, float ad) {
+                const float* q[6] = {a, b, c, a, c, d}; const float al[6] = {aa, ab, ac, aa, ac, ad};
+                for (int i = 0; i < 6; i++) { climaV.push_back(q[i][0]); climaV.push_back(q[i][1]); climaV.push_back(q[i][2]); climaV.push_back(al[i]); }
+            };
+            const float pI = camAgua ? 0.0f : g_clP * (1.0f - g_clCub) * climaAlt;
+            const float luzP = 0.30f + 0.70f * dia;
+            const double tp = std::fmod(ahora, 3000.0);
+            if (pI > 0.01f && g_clNieve < 0.99f) {        // lluvia: rayitas que caen rapido, algo inclinadas por el viento
+                const float R = 18.0f, H = 22.0f;
+                const int n = (int)(2400 * pI * (1.0f - g_clNieve));
+                for (int i = 0; i < n; i++) {
+                    float dx = fmodPos(hf(i * 4u + 1) * 2 * R - cam.x, 2 * R) - R, dz = fmodPos(hf(i * 4u + 2) * 2 * R - cam.z, 2 * R) - R;
+                    float dy = fmodPos(hf(i * 4u + 3) * H - tp * 26.0 - cam.y, H) - 8.0f;
+                    float fade = 1.0f - (dx * dx + dz * dz) / (R * R);
+                    if (fade <= 0) continue;
+                    fade *= std::min(1.0f, std::max(0.0f, (std::sqrt(dx * dx + dz * dz + dy * dy) - 0.6f) / 2.0f));
+                    float p0[3] = {dx, dy, dz}, p1[3] = {dx + 0.10f, dy + 1.0f, dz + 0.04f};
+                    float w = 0.014f;
+                    float a[3] = {p0[0] - (float)rg_.x * w, p0[1] - (float)rg_.y * w, p0[2] - (float)rg_.z * w}, b[3] = {p0[0] + (float)rg_.x * w, p0[1] + (float)rg_.y * w, p0[2] + (float)rg_.z * w};
+                    float c[3] = {p1[0] + (float)rg_.x * w, p1[1] + (float)rg_.y * w, p1[2] + (float)rg_.z * w}, d[3] = {p1[0] - (float)rg_.x * w, p1[1] - (float)rg_.y * w, p1[2] - (float)rg_.z * w};
+                    quadW(a, b, c, d, fade, fade, 0.0f, 0.0f);
+                }
+                subirW(0.72f * luzP + 0.08f, 0.80f * luzP + 0.08f, 0.92f * luzP + 0.08f, 0.55f * (1.0f - g_clNieve));
+            }
+            if (pI > 0.01f && g_clNieve > 0.01f) {        // nieve: copos que oscilan al caer despacio
+                const float R = 22.0f, H = 16.0f;
+                const int n = (int)(2200 * pI * g_clNieve);
+                for (int i = 0; i < n; i++) {
+                    float h = hf(i * 5u + 11);
+                    float dx = fmodPos(hf(i * 5u + 1) * 2 * R - cam.x, 2 * R) - R + std::sin((float)tp * 0.9f + h * 40.0f) * 0.40f;
+                    float dz = fmodPos(hf(i * 5u + 2) * 2 * R - cam.z, 2 * R) - R + std::cos((float)tp * 0.7f + h * 31.0f) * 0.40f;
+                    float dy = fmodPos(hf(i * 5u + 3) * H - tp * (1.5 + 1.0 * h) - cam.y, H) - 6.0f;
+                    float fade = 1.0f - (dx * dx + dz * dz) / (R * R);
+                    if (fade <= 0) continue;
+                    fade *= std::min(1.0f, std::max(0.0f, (std::sqrt(dx * dx + dz * dz + dy * dy) - 0.8f) / 2.5f));
+                    float sz = 0.040f + 0.040f * hf(i * 5u + 4);
+                    float rx = (float)rg_.x * sz, ry = (float)rg_.y * sz, rz = (float)rg_.z * sz, ux = (float)up_.x * sz, uy = (float)up_.y * sz, uz = (float)up_.z * sz;
+                    float a[3] = {dx - rx - ux, dy - ry - uy, dz - rz - uz}, b[3] = {dx + rx - ux, dy + ry - uy, dz + rz - uz};
+                    float c[3] = {dx + rx + ux, dy + ry + uy, dz + rz + uz}, d[3] = {dx - rx + ux, dy - ry + uy, dz - rz + uz};
+                    quadW(a, b, c, d, fade, fade, fade, fade);
+                }
+                subirW(0.93f * luzP + 0.07f, 0.95f * luzP + 0.07f, 1.0f * luzP + 0.07f, 0.95f);
+            }
+            double dr = ahora - g_rayoT;
+            if (!camAgua && dr >= 0 && dr < 0.45 && g_rayoPts.size() >= 6 && rayoF > 0.02f) {    // rayo: cinta quebrada de las nubes al suelo
+                const size_t np = g_rayoPts.size() / 3;
+                for (size_t i = 0; i + 1 < np; i++) {
+                    float a0[3] = {g_rayoPts[i * 3] - (float)cam.x, g_rayoPts[i * 3 + 1] - (float)cam.y, g_rayoPts[i * 3 + 2] - (float)cam.z};
+                    float a1[3] = {g_rayoPts[i * 3 + 3] - (float)cam.x, g_rayoPts[i * 3 + 4] - (float)cam.y, g_rayoPts[i * 3 + 5] - (float)cam.z};
+                    float dx = a1[0] - a0[0], dy = a1[1] - a0[1], dz = a1[2] - a0[2];
+                    float mx = (a0[0] + a1[0]) * 0.5f, my = (a0[1] + a1[1]) * 0.5f, mz = (a0[2] + a1[2]) * 0.5f;
+                    float sx = dy * mz - dz * my, sy = dz * mx - dx * mz, sz = dx * my - dy * mx;      // lado = segmento x vista
+                    float sl = std::sqrt(sx * sx + sy * sy + sz * sz) + 1e-6f, w = 0.45f + 0.0025f * std::sqrt(mx * mx + mz * mz);
+                    sx = sx / sl * w; sy = sy / sl * w; sz = sz / sl * w;
+                    float a[3] = {a0[0] - sx, a0[1] - sy, a0[2] - sz}, b[3] = {a0[0] + sx, a0[1] + sy, a0[2] + sz}, c[3] = {a1[0] + sx, a1[1] + sy, a1[2] + sz}, d[3] = {a1[0] - sx, a1[1] - sy, a1[2] - sz};
+                    quadW(a, b, c, d, 1.0f, 1.0f, 1.0f, 1.0f);
+                }
+                subirW(0.90f, 0.93f, 1.0f, std::min(1.0f, rayoF * 1.3f));
+            }
+            for (int pase = 0; pase < 2 && !g_explos.empty(); pase++) {      // explosiones: humo (pase 0) y fuego (pase 1)
+                for (const Explosion& e : g_explos) {
+                    const float age = (float)(ahora - e.t0);
+                    const float R = (float)e.R, exp_ = 1.0f - std::exp(-age * 4.0f);
+                    const int n = pase == 0 ? 150 : 110;
+                    for (int i = 0; i < n; i++) {
+                        uint32_t sd = (uint32_t)(i * 7 + pase * 1000 + (int)(e.x * 13 + e.z * 29));
+                        float u1 = hf(sd * 3 + 1) * 2.0f - 1.0f, a2 = hf(sd * 3 + 2) * 6.2831853f, rr = std::sqrt(std::max(0.0f, 1.0f - u1 * u1));
+                        float dirx = rr * std::cos(a2), diry = u1, dirz = rr * std::sin(a2);
+                        float dist = R * (0.15f + 0.85f * hf(sd * 3 + 3)) * exp_ * (pase == 0 ? 1.0f : 0.8f);
+                        float cx = (float)(e.x - cam.x) + dirx * dist, cy = (float)(e.y - cam.y) + diry * dist + age * (pase == 0 ? 2.2f : 0.8f), cz = (float)(e.z - cam.z) + dirz * dist;
+                        float sz, al;
+                        if (pase == 0) { sz = (0.55f + 1.1f * hf(sd + 9)) * (0.35f + R * 0.10f) * (0.5f + 0.7f * age); al = std::max(0.0f, 1.0f - age / 1.8f) * 0.75f; }
+                        else { if (age > 0.75f) break; sz = (0.45f + 0.8f * hf(sd + 9)) * (0.35f + R * 0.09f) * (1.0f - age / 0.75f * 0.6f); al = std::max(0.0f, 1.0f - age / 0.75f); }
+                        float rx = (float)rg_.x * sz, ry = (float)rg_.y * sz, rz = (float)rg_.z * sz, ux = (float)up_.x * sz, uy = (float)up_.y * sz, uz = (float)up_.z * sz;
+                        float a[3] = {cx - rx - ux, cy - ry - uy, cz - rz - uz}, b[3] = {cx + rx - ux, cy + ry - uy, cz + rz - uz};
+                        float c[3] = {cx + rx + ux, cy + ry + uy, cz + rz + uz}, d[3] = {cx - rx + ux, cy - ry + uy, cz - rz + uz};
+                        quadW(a, b, c, d, al, al, al, al);
+                    }
+                }
+                if (pase == 0) subirW(0.20f * luzP + 0.05f, 0.19f * luzP + 0.05f, 0.18f * luzP + 0.05f, 0.85f);
+                else subirW(1.0f, 0.55f, 0.12f, 1.0f);
+            }
+            glDepthMask(GL_TRUE);
         }
         glDisable(GL_BLEND);
 

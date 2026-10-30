@@ -22,7 +22,8 @@ constexpr size_t LRN = (size_t)LRX * LRX * LRY;
 static inline int luzCoste(uint8_t t) {      // 255 = bloquea la luz
     if (t >= AGUA_F1 && t <= AGUA_F8) return 1;
     switch (t) {
-        case AIRE: case ANTORCHA: case VIDRIO: return 0;
+        case AIRE: case ANTORCHA: case VIDRIO: case LIANA: case FLOR_ROJA: case FLOR_AMARILLA: case FLOR_AZUL: case FLOR_ROSA: return 0;
+        case HOJA_SELVA: case HOJA_NIEVE: case ALGA:
         case AGUA: case HOJAS: case HOJA_ROJA: case HOJA_NARANJA: case HOJA_AMARILLA: case HOJA_ROSA: case HOJA_PINO: return 1;
         default: return 255;
     }
@@ -194,6 +195,7 @@ static void calcularLuz(const SnapColumnas& sn, int cyObj, uint8_t* out) {
             }
         };
         fuente(ANTORCHA, LTORCH, TORCH_RGB);
+        { static const float LAVA_RGB[3] = {1.0f, 0.45f, 0.12f}; fuente(LAVA, LTORCH - 2 * SUB, LAVA_RGB); }       // la lava ilumina
         for (int k = 0; k < 12; k++) fuente((uint8_t)(LED_ROJO + k), LLED, LED_RGB[k]);
         luzBFS(BR.data(), T.data(), coste, qr, WH);
         luzBFS(BG.data(), T.data(), coste, qg, WH);

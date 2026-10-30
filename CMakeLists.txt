@@ -22,6 +22,8 @@ FetchContent_MakeAvailable(glfw)
 find_package(Threads REQUIRED)
 
 add_executable(juego src/main.cpp src/red_sock.cpp src/mundo.h src/luz.h src/gl_loader.h src/red.h src/jugadores.h src/skin.h)
+set(SUB_VAL 2 CACHE STRING "cubitos por lado de un bloque (1, 2, 4 u 8)")
+target_compile_definitions(juego PRIVATE SUB_VAL=${SUB_VAL})
 target_link_libraries(juego PRIVATE glfw Threads::Threads)
 if(WIN32)
   target_link_libraries(juego PRIVATE ws2_32)
