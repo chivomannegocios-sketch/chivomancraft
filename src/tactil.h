@@ -14,7 +14,7 @@
 #include <functional>
 #include <vector>
 
-enum TId { T_SALTO, T_ROMPER, T_PONER, T_VOLAR, T_MENU, T_PAUSA, T_BAJAR, T_PINCEL, T_G, T_H, T_CAM, T_Q, T_E, T_GASM, T_GASL, T_FRENO, T_Z, T_C, T_CHAT, T_SOLTAR, T_HORA, T_GUARDAR, T_KB, T_ENVIAR };
+enum TId { T_SALTO, T_ROMPER, T_PONER, T_VOLAR, T_MENU, T_PAUSA, T_BAJAR, T_PINCEL, T_G, T_H, T_CAM, T_Q, T_E, T_GASM, T_GASL, T_FRENO, T_Z, T_C, T_CHAT, T_SOLTAR, T_HORA, T_GUARDAR, T_KB, T_ENVIAR, T_PERF, T_VISTA };
 // codigos de tecla (iguales a los de GLFW)
 enum { TK_SPACE = 32, TK_ESC = 256, TK_SHIFT = 340, TK_CTRL = 341, TK_TAB = 258, TK_W = 87, TK_A = 65, TK_S = 83, TK_D = 68,
        TK_F = 70, TK_E = 69, TK_B = 66, TK_G = 71, TK_H = 72, TK_Q = 81, TK_Z = 90, TK_C = 67, TK_1 = 49 };
@@ -80,6 +80,8 @@ struct Tactil {
         add(T_SOLTAR, "SOLTAR", W - 2.6f * r, 2.4f * r, 0.7f * r, TK_Q, false);             // Q: botar el objeto elegido
         add(T_HORA, "HORA", W - 4.2f * r, 2.4f * r, 0.7f * r, 84, false);                   // T: cambiar la hora
         add(T_GUARDAR, "GUARDAR", W - 5.8f * r, 2.4f * r, 0.7f * r, 294, false);            // F5
+        add(T_PERF, "F3", W - 7.4f * r, 2.4f * r, 0.7f * r, 292, false);                   // panel de rendimiento
+        add(T_VISTA, "VISTA", W - 9.0f * r, 2.4f * r, 0.7f * r, 320, false);              // pad 0: primera / tercera persona
         add(T_MENU, "MENU", W - 2.6f * r, 0.8f * r, 0.7f * r, TK_E, false);
         add(T_VOLAR, "VOLAR", W - 4.2f * r, 0.8f * r, 0.7f * r, TK_F, false);
         add(T_PINCEL, "PINCEL", W - 5.8f * r, 0.8f * r, 0.7f * r, TK_B, false);

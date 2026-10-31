@@ -657,3 +657,38 @@ v86 - MUNDO SUB 1 / SUB 2, BRAZO, BARRA VACIA, TECLA Q, CONTROLES Y TECLADO DEL 
   APK SUB 1: en android/app/src/main/cpp/CMakeLists.txt cambia la linea  set(SUB_VAL 2 ...)  por  set(SUB_VAL 1 ...)  y compila el APK como siempre (el APK es de UN solo SUB). Si quieres tener instalados el de SUB 1 y el de SUB 2 a la vez, el segundo necesita otro nombre de paquete en el manifiesto. Los mundos de cada SUB son distintos y no se mezclan.
   (v86 APK) AHORA EL APK TRAE LOS DOS SUB (versionCode 22). Ya no hay que cambiar nada en CMake (ignora la instruccion anterior del APK SUB 1). El workflow de GitHub compila dos librerias: libjuego.so (SUB 2, la que abre Android) y libjuego_sub1.so (SUB 1). En el menu principal del celular el boton "MUNDO SUB 2/SUB 1 (CAMBIAR)" guarda la eleccion (sub.txt) y la app se cierra y se vuelve a abrir en el otro SUB; recuerda la ultima eleccion. Cada SUB usa su propia carpeta de mundos. Es un solo icono / un solo APK.
   NO probado: es codigo de Android que no se pudo compilar aqui (dlopen de la 2da libreria dentro de la misma actividad). Si el boton cierra la app y no abre SUB 1, mandame el error o revisa en Actions que haya compilado.
+
+v87 - PANEL DE RENDIMIENTO (F3) PARA SABER QUE BAJA LOS FPS. (src/perf.h)
+  F3 (en el celular: boton F3 en la segunda fila de botones) abre/cierra el panel. Mientras esta abierto tambien se guarda el archivo rendimiento.csv (una linea cada 0.5 s, al lado del .exe/en la carpeta de trabajo) para que me lo mandes.
+  Muestra: FPS, ms por cuadro, peor cuadro y tirones (>33 ms y >50 ms); CPU del hilo principal por partes (actualizar, preparar camara/culling, enviar terreno, resto, HUD, swap/espera de pantalla) y dentro de "actualizar": subir mallas a la GPU, remallar al picar, mobs, mundo lejano; GPU en ms (cielo+terreno, y el resto; solo PC, en el celular no hay medicion); hilos (ms por chunk al generar, mallar, luz y mundo lejano, y cuantos por segundo); pendientes y cola; llamadas de dibujo, triangulos, chunks visibles/tapados/cargados; mobs, RAM, resolucion y VSYNC.
+  Arriba dice un diagnostico: "LIMITA LA CPU / LA GPU / NADA LIMITA (VSYNC)" y que es lo mas pesado. Para medir de verdad apaga el VSYNC con la tecla V (si no, los FPS se quedan pegados a los Hz de tu pantalla y sale "la pantalla espera").
+  Probado en software (Linux): el panel, el csv y las consultas de GPU funcionan. En llamadas con llvmpipe la espera del swap incluye el dibujo, por eso alla el diagnostico no es fiable; en tu PC si. NO probado en Android real.
+
+v88 - OPTIMIZACION A PARTIR DE TU MEDICION (103 FPS, GPU casi libre, limite en la CPU: "PREPARAR" 7 ms con picos de 16 ms).
+  Hallazgo: las llamadas de dibujo del terreno NO eran el problema (293 llamadas cuestan solo 0.46 ms), asi que multi-draw/instancing no ayudaban. Lo pesado era el MAPA DE SOMBRAS: se rehacia (dibujando de nuevo todos los chunks cercanos) casi en cada cuadro al moverte, porque su centro se movia en cada texel.
+  Cambios: el centro del mapa de sombras ahora salta en pasos de ~8 bloques (el radio sube de 100 a 108 para cubrir el paso) y solo se rehace al cruzar un paso, si el sol se mueve, o cada 12 cuadros (antes 4). Las sombras no cambian de aspecto; al picar/poner bloques la sombra puede tardar unas decimas de segundo en actualizarse.
+  Ademas la altura minima de cada columna (para ocultar chunks enterrados) se guarda entre cuadros en vez de recalcularse con 25 consultas de ruido por columna en cada cuadro.
+  El panel F3 ahora divide PREPARAR en: camara/cielo/clima/sombras, culling, ordenar. Mandame otra captura o el rendimiento.csv para ver cuanto bajo.
+
+v89 - ARREGLO: PARPADEO DE SOMBRAS AL ELEVARTE/VOLAR.
+  Causa: el mapa de sombras guardaba la profundidad relativa a donde estaba la camara en el cuadro en que se hizo. Al subir o bajar (sin cruzar una celda lateral) el mapa guardado dejaba de coincidir con la profundidad que calcula el shader y salian sombras falsas por unos milisegundos hasta que se rehacia. Ahora la profundidad queda fija al mundo (en pasos de ~8 bloques, igual que el centro) y se rehace tambien al cruzar un paso en ese eje. Con esto tambien se cubre el cambio de la v88 (que lo habria empeorado al rehacerse menos seguido).
+  Probado en software que las sombras se siguen viendo bien al subir; el parpadeo en si depende de tu GPU: dime si sigue pasando.
+
+v90 - AVATAR 3D (FASE 1: EDITOR DE CUBITOS).
+  - Menu principal > AVATAR 3D. Tu avatar es una lista de cubitos de color, cada uno de una parte del cuerpo
+    (cabeza, torso, brazos, piernas). Empieza con un modelo parecido al jugador normal.
+  - Caja amarilla = limite de tamano (el cuerpo normal mas 3 cubitos por cada lado). Los cubitos pueden
+    traspasarse entre si (se "fusionan"). Eje azul = hacia donde mira el avatar.
+  - Raton: clic elige cubito, clic derecho + arrastrar gira, rueda zoom. Botones del panel: partes, 32 colores,
+    mover (X/Y/Z), tamano, NUEVO, COPIAR, ESPEJAR, BORRAR, MODELO BASE, VER SOLO UNA PARTE. Se guarda solo
+    en avatar.txt. Teclado: flechas (segun la camara), RePag/AvPag, Mayus+flechas = tamano, N, C, M, Supr, Tab, Esc.
+  - En el celular se usa con los botones del panel (IZQ/DER/ARR/ABA para girar, ZOOM).
+  - Todavia NO se usa en el juego: eso es la fase 2. Luego animaciones cuadro por cuadro (fase 3) y multijugador (fase 4).
+
+v91 - AVATAR 3D (FASE 2): TU AVATAR DENTRO DEL JUEGO + TERCERA PERSONA.
+  - Tu avatar (el que armas en MENU > AVATAR 3D) ahora es tu cuerpo en el juego: el brazo que ves en primera persona
+    y el cuerpo en tercera persona, con la misma animacion de siempre (cabeza sigue el cabeceo, caminar, golpear).
+  - Tecla PAD 0 (el 0 del teclado numerico): cambia de vista -> primera persona / tercera detras / tercera de frente.
+    En el celular hay un boton VISTA. La camara se acerca sola si hay un bloque detras de ti.
+  - Cambio: en el editor IZQUIERDA ahora es el lado +x (como el modelo del juego). Tu avatar.txt de v90 se convierte solo.
+  - Los otros jugadores en multijugador todavia ven la skin normal (el avatar propio compartido es la fase 4).

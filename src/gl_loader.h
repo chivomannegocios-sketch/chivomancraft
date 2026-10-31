@@ -128,6 +128,10 @@ typedef ptrdiff_t GLsizeiptr, GLintptr;
     X(void, glBindBuffer, (GLenum, GLuint)) \
     X(void, glBufferData, (GLenum, GLsizeiptr, const void*, GLenum)) \
     X(void, glDeleteBuffers, (GLsizei, const GLuint*)) \
+    X(void, glGenQueries, (GLsizei, GLuint*)) \
+    X(void, glBeginQuery, (GLenum, GLuint)) \
+    X(void, glEndQuery, (GLenum)) \
+    X(void, glGetQueryObjectuiv, (GLuint, GLenum, GLuint*)) \
     X(void, glEnableVertexAttribArray, (GLuint)) \
     X(void, glVertexAttribPointer, (GLuint, GLint, GLenum, GLboolean, GLsizei, const void*)) \
     X(void, glTexImage2D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*)) \

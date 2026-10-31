@@ -313,6 +313,7 @@ static void jugDibujar(const float* vp, double camx, double camy, double camz, c
 }
 
 // mano en primera persona (brazo con la skin + objeto): se dibuja al final sobre todo lo demas
+static void avGenerar(const Remoto& m, double camx, double camy, double camz, std::vector<float>& out, std::vector<float>* items, int solo, float angPrimera);   // (avatar.h)
 static float g_swingLocal = 0;
 static void jugDibujarMano(const float* vp, double cx, double cy, double cz, double yaw, double pitch, uint8_t held, bool golpeando, double dt,
                            const float* sol, float solF, float skyMul, const float* cielo) {
@@ -333,6 +334,13 @@ static void jugDibujarMano(const float* vp, double cx, double cy, double cz, dou
     m.sx = (float)cx + want[0] - Xx * (-6.0f) * S; m.sy = (float)cy + want[1] - 24.0f * S; m.sz = (float)cz + want[2] - Xz * (-6.0f) * S;
     glClear(GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE); glDisable(GL_CULL_FACE); glDisable(GL_BLEND);
+    {   // el brazo es el de tu avatar (cubitos de color)
+        std::vector<float> v, items;
+        avGenerar(m, cx, cy, cz, v, &items, 2, -(1.20f + (float)pitch * 0.9f));
+        v.insert(v.end(), items.begin(), items.end());
+        itemDibujar(vp, sol, solF, skyMul, cielo, 1e7f, 2e7f, v);
+        return;
+    }
     glUseProgram(g_progJug);
     auto U = [&](const char* n) { return glGetUniformLocation(g_progJug, n); };
     glUniformMatrix4fv(U("uVP"), 1, GL_FALSE, vp);

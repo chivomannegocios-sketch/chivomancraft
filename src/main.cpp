@@ -17,6 +17,7 @@
 #include "mundo.h"
 #include "luz.h"
 #include "tactil.h"
+#include "perf.h"
 #include "red.h"
 #include <cctype>
 #include <deque>
@@ -327,7 +328,8 @@ static int guardarTodosLosSucios() {
 static void pedirGenerar(const ChunkP& c) {
     g_genPend++;
     g_pool.meter([c] {
-        if (!cargarChunkArchivo(c->cx, c->cy, c->cz, c->dat)) c->dat = generarChunk(c->cx, c->cy, c->cz);
+        { perf::Reloj rl(perf::genUs); perf::genN++;
+        if (!cargarChunkArchivo(c->cx, c->cy, c->cz, c->dat)) c->dat = generarChunk(c->cx, c->cy, c->cz); }
         c->state.store(ST_READY, std::memory_order_release);
         g_genPend--;
     });
@@ -348,8 +350,9 @@ static void pedirMalla(const ChunkP& c, int d2) {
         DatosMalla op, ag;
         std::vector<uint8_t> luz;
         if (c->viva.load()) {
-            construirMalla(copia, op, ag);
+            { perf::Reloj rl(perf::mallaUs); perf::mallaN++; construirMalla(copia, op, ag); }
             if (!op.i.empty() || !ag.i.empty()) {
+                perf::Reloj rl2(perf::luzUs);
                 luz.resize((size_t)LN * LN * LN * 4);
                 calcularLuz(*sn, c->cy, luz.data());
             }
@@ -390,6 +393,7 @@ static void recogerMallas(int maxSubidas) {
 
 // remalla en el momento (al editar bloques)
 static void remallarYa(const ChunkP& c) {
+    perf::Alcance _pa(perf::P_REMALLAR);
     DatosChunk s[7];
     juntar(*c, s);
     DatosMalla op, ag;
@@ -888,7 +892,7 @@ static void lodActualizar(double px, double pz) {
         g_lod[lodClave(t->niv, t->tx, t->tz)] = t;
         g_lodPend++;
         MascaraP mk = g_mascara;
-        g_pool.meter([t, mk] { lodGenerar(*t, mk); t->estado.store(1, std::memory_order_release); g_lodPend--; });
+        g_pool.meter([t, mk] { { perf::Reloj rl(perf::lodUs); perf::lodN++; lodGenerar(*t, mk); } t->estado.store(1, std::memory_order_release); g_lodPend--; });
     }
 }
 static void planosFrustum(const float* m, float pl[6][4]) {
@@ -920,7 +924,7 @@ static void lodProcesarRegen() {
         g_lodRep[k] = t;
         g_lodPend++;
         MascaraP mk = g_mascara;
-        g_pool.meter([t, mk] { lodGenerar(*t, mk); t->estado.store(1, std::memory_order_release); g_lodPend--; });
+        g_pool.meter([t, mk] { { perf::Reloj rl(perf::lodUs); perf::lodN++; lodGenerar(*t, mk); } t->estado.store(1, std::memory_order_release); g_lodPend--; });
     }
     g_lodRegen.clear();
 }
@@ -2557,10 +2561,11 @@ static void lanAnunciar(double ahora, const std::string& nombre, int puerto, int
     if (n > 0) rs_udp_difundir(LAN_PUERTO, b, std::min(n, (int)sizeof b - 1));
 }
 // geometria del menu de inicio y del multijugador
-static MRect tituloRect(int fbw, int fbh, int i) {
-    float k = std::max(0.8f, fbh / 720.0f), w = 460 * k, h = 62 * k, gap = 16 * k;
-    return {(fbw - w) / 2.0f, fbh * 0.34f + i * (h + gap), w, h};
+static MRect tituloRect(int fbw, int fbh, int i) {      // i = posicion en pantalla (0..5)
+    float k = std::max(0.8f, fbh / 720.0f), w = 460 * k, h = 56 * k, gap = 12 * k;
+    return {(fbw - w) / 2.0f, fbh * 0.27f + i * (h + gap), w, h};
 }
+static const int TIT_ID[6] = {0, 1, 2, 5, 3, 4};      // id de accion de cada posicion: crear, mis mundos, multijugador, avatar, salir, tipo de mundo
 struct MLBase { float k, x0, w, y0, hFila, gap; int vis; };
 static MLBase lanBase(int fbw, int fbh) {
     MLBase b; b.k = std::max(0.8f, fbh / 720.0f);
@@ -2574,11 +2579,11 @@ static MRect lanCampo(const MLBase& b, int fbh) { return {b.x0, fbh - 168 * b.k,
 static MRect lanUnir(const MLBase& b, int fbh) { return {b.x0 + b.w * 0.64f, fbh - 168 * b.k, b.w * 0.36f, 46 * b.k}; }
 static MRect lanVolver(const MLBase& b, int fbh) { return {b.x0, fbh - 108 * b.k, b.w * 0.30f, 44 * b.k}; }
 // pantalla 2: 0..3 botones.  pantalla 3: 10 volver, 11 unir por IP, 12+i servidor i
+static void avAbrir();
 static int inicioHit(double mx, double my) {
     double px = mx * g_fbW / std::max(1, g_winW), py = my * g_fbH / std::max(1, g_winH);
     if (g_pantalla == 2) { 
-        const int nb = 5;
-        for (int i = 0; i < nb; i++) if (mDentro(tituloRect(g_fbW, g_fbH, i), px, py)) return i; return -1; }
+        for (int i = 0; i < 6; i++) if (mDentro(tituloRect(g_fbW, g_fbH, i), px, py)) return TIT_ID[i]; return -1; }
     MLBase b = lanBase(g_fbW, g_fbH);
     if (mDentro(lanVolver(b, g_fbH), px, py)) return 10;
     if (mDentro(lanUnir(b, g_fbH), px, py)) return 11;
@@ -2591,6 +2596,7 @@ static void inicioAccion(GLFWwindow* w, int h) {
         else if (h == 1) { g_mundos = listarMundos(); g_scrollM = 0; g_confBorrar = -1; g_pantalla = 0; }
         else if (h == 2) { g_errorInicio.clear(); lanAbrir(); g_pantalla = 3; }
         else if (h == 3) glfwSetWindowShouldClose(w, 1);
+        else if (h == 5) { avAbrir(); }
 #ifdef ANDROID_GAME
         else if (h == 4) {       // el APK trae las dos versiones: se guarda cual abrir y la app se relanza
             FILE* f = std::fopen("sub.txt", "w");
@@ -2610,7 +2616,13 @@ static void inicioAccion(GLFWwindow* w, int h) {
     }
 }
 
+static int g_vista = 0;      // 0 primera persona, 1 tercera (detras), 2 tercera (de frente): tecla pad 0
+static void avClic(int boton, int accion);
+static void avMouse(double x, double y);
+static void avRueda(double dy);
+static void avTecla(GLFWwindow* w, int tecla, int accion);
 static void alMouse(GLFWwindow*, double x, double y) {
+    if (g_pantalla == 4) { avMouse(x, y); g_mx = x; g_my = y; return; }
     if (!g_capturado) { g_mx = x; g_my = y; return; }
     if (g_primerMouse) { g_mx = x; g_my = y; g_primerMouse = false; }
     g_j.yaw += (x - g_mx) * 0.0025;
@@ -2651,6 +2663,7 @@ static int g_menuPag = 0;                  // pagina actual del menu de material
 static const int MENU_PAG = 50;
 static int menuPaginas() { return std::max(1, ((int)g_menuItems.size() + MENU_PAG - 1) / MENU_PAG); }
 static void alRueda(GLFWwindow*, double, double dy) {
+    if (g_pantalla == 4) { avRueda(dy); return; }
     if (g_pantalla == 0) { g_scrollM += dy > 0 ? -1 : 1; mundosClamp(); return; }
     if (g_pantalla == 3) { MLBase b = lanBase(g_fbW, g_fbH); g_scrollL = std::max(0, std::min(g_scrollL + (dy > 0 ? -1 : 1), (int)g_lan.size() - b.vis)); return; }
     if (g_pantalla == 2) return;
@@ -2773,6 +2786,7 @@ static void alChar(GLFWwindow*, unsigned int cp) {
     if (g_chat && cp >= 32 && cp < 127 && g_chatBuf.size() < 100) g_chatBuf += (char)cp;
 }
 static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
+    if (g_pantalla == 4) { avTecla(w, tecla, accion); return; }
     if (g_pantalla == 3 && tecla == GLFW_KEY_BACKSPACE && (accion == GLFW_PRESS || accion == GLFW_REPEAT) && !g_ipTexto.empty()) { g_ipTexto.pop_back(); return; }
     if (g_chat && (accion == GLFW_PRESS || accion == GLFW_REPEAT)) {      // escribiendo un mensaje
         if (tecla == GLFW_KEY_ESCAPE) g_chat = false;
@@ -2869,14 +2883,17 @@ static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
     if (tecla == GLFW_KEY_J && !g_survival) { g_j.p.y += 500.0; g_j.v = {0, 0, 0}; g_j.volar = true; }   // creativo: subir 500 bloques de golpe (para ver la Tierra desde el espacio)
     if (tecla == GLFW_KEY_K) { g_climaE = (g_climaE + 1) % 5; g_climaT = 150.0; g_climaFijo = false; }   // cambiar el clima a mano
     if (tecla == GLFW_KEY_F5) g_guardarYa = true;
+    if (tecla == 320) { g_vista = (g_vista + 1) % 3; aviso(g_vista == 0 ? "VISTA: PRIMERA PERSONA" : g_vista == 1 ? "VISTA: TERCERA PERSONA (DETRAS)" : "VISTA: TERCERA PERSONA (DE FRENTE)"); }   // pad 0
     if (tecla == GLFW_KEY_F9) g_pedirCiudad = true;       // prueba de rendimiento: ciudad de luces
     if (tecla == GLFW_KEY_B || tecla == GLFW_KEY_LEFT_CONTROL) g_pincelBloque = !g_pincelBloque;
     if (tecla == GLFW_KEY_V) { g_vsync = !g_vsync; glfwSwapInterval(g_vsync ? 1 : 0); }
+    if (tecla == 292) { perf::visible = !perf::visible; aviso(perf::visible ? "PANEL DE RENDIMIENTO (F3): SE GUARDA RENDIMIENTO.CSV" : "PANEL DE RENDIMIENTO APAGADO"); }
     if (tecla == GLFW_KEY_X || tecla == GLFW_KEY_0) { g_barra[g_sel] = VACIO; aplicarSel(); guardarBarra(); }
     if (tecla == GLFW_KEY_Q) qBotar();
     if (tecla >= GLFW_KEY_1 && tecla <= GLFW_KEY_9) { g_sel = tecla - GLFW_KEY_1; aplicarSel(); }
 }
 static void alClic(GLFWwindow* w, int boton, int accion, int) {
+    if (g_pantalla == 4) { avClic(boton, accion); return; }
     if (accion == GLFW_RELEASE && g_menu && g_pantalla == 1 && !g_pausa && boton == GLFW_MOUSE_BUTTON_LEFT && g_mano != -100) {
         double dx = g_mx - g_manoX, dy = g_my - g_manoY;
         if (dx * dx + dy * dy > 36.0) {                       // fue un arrastre: soltar donde esta el cursor (si no hay casilla, se cancela)
@@ -3404,6 +3421,28 @@ static void hCorazon(float x, float y, float s, int lleno) {   // lleno: 0 vacio
         else hRect(x + i * c, y + j * c, c + 0.5f, c + 0.5f, 0.22f, 0.05f, 0.06f);
     }
 }
+static void perfDibujar(int fbw, int fbh) {
+    const perf::Snap& s = perf::snap;
+    float k = std::max(0.8f, fbh / 720.0f), t = std::max(1.0f, 1.5f * k);
+    float x = 8 * k, y = 135 * k, lh = 11.0f * t;
+    char b[220];
+    auto L = [&](float r, float g, float bl) { float w = hAncho(b, t); hRect(x - 2, y - 1, w + 6, lh - 1, 0, 0, 0, 0.62f); hTexto(b, x, y, t, r, g, bl); y += lh; };
+    if (!s.ok) { std::snprintf(b, sizeof b, "MIDIENDO..."); L(1, 1, 1); return; }
+    std::snprintf(b, sizeof b, "RENDIMIENTO (F3)  %.0f FPS  %.1f MS  PEOR %.0f MS  TIRONES >33MS: %d  >50MS: %d", s.fps, s.frame, s.frameMx, s.tir33, s.tir50);
+    L(1, 0.95f, 0.5f);
+    std::snprintf(b, sizeof b, "%s", s.diag.c_str()); L(0.5f, 1, 0.6f);
+    if (!s.diag2.empty()) { std::snprintf(b, sizeof b, "%s", s.diag2.c_str()); L(0.7f, 0.95f, 0.7f); }
+    std::snprintf(b, sizeof b, "CPU PRINCIPAL (MS PROMEDIO / PEOR):"); L(0.8f, 0.9f, 1);
+    for (int i = 0; i < perf::S_N; i++) { std::snprintf(b, sizeof b, " %-40s %5.2f / %5.1f", perf::NOM_S[i], s.s[i], s.smx[i]); L(1, 1, 1);
+        if (i == perf::S_ACT || i == perf::S_PREP) for (int j = (i == perf::S_ACT ? 0 : perf::P_CIELO); j < (i == perf::S_ACT ? perf::P_CIELO : perf::P_N); j++) { std::snprintf(b, sizeof b, "    - %-36s %5.2f / %5.1f", perf::NOM_P[j], s.p[j], s.pmx[j]); L(0.75f, 0.75f, 0.8f); } }
+    if (s.gpuA >= 0 && s.gpuB >= 0) { std::snprintf(b, sizeof b, "GPU: CIELO+TERRENO %.2f MS   RESTO %.2f MS   TOTAL %.2f MS", s.gpuA, s.gpuB, s.gpuA + s.gpuB); L(1, 0.8f, 0.6f); }
+    else { std::snprintf(b, sizeof b, "GPU: SIN MEDICION (ESPERANDO O NO DISPONIBLE EN ESTE DISPOSITIVO)"); L(0.8f, 0.8f, 0.8f); }
+    std::snprintf(b, sizeof b, "HILOS (%d): GENERAR %.2f MS (%.0f/S)  MALLA %.2f MS  LUZ %.2f MS (%.0f/S)  LEJANO %.1f MS (%.0f/S)", s.c.hilos, s.genMs, s.genPorS, s.mallaMs, s.luzMs, s.mallaPorS, s.lodMs, s.lodPorS); L(0.8f, 1, 0.9f);
+    std::snprintf(b, sizeof b, "PENDIENTES: GENERAR %d  MALLAR %d  LEJANO %d  COLA %d  LISTAS PARA SUBIR %d", s.c.genPend, s.c.meshPend, s.c.lodPend, s.c.cola, s.c.hechos); L(0.8f, 1, 0.9f);
+    std::snprintf(b, sizeof b, "DIBUJO: %d LLAMADAS  %dK TRIANGULOS  %d CHUNKS VISIBLES  %d TAPADOS  %d CARGADOS  %d LEJANOS", s.c.llamadas, s.c.tri / 1000, s.c.visibles, s.c.tapados, s.c.chunks, s.c.lodTiles); L(1, 1, 0.8f);
+    std::snprintf(b, sizeof b, "MOBS: %d OVEJAS %d NEANDERTALES %d OBJETOS   RAM %.0f MB   %dX%d   VSYNC %s (V)", s.c.ovejas, s.c.neans, s.c.sueltos, s.ramMB, s.c.w, s.c.h, s.c.vsync ? "SI" : "NO"); L(1, 1, 0.8f);
+    std::snprintf(b, sizeof b, "SE GUARDA RENDIMIENTO.CSV CADA 0.5 S MIENTRAS ESTE PANEL ESTA ABIERTO"); L(0.6f, 0.6f, 0.65f);
+}
 static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, double px_, double py_, double pz_) {
     float k = std::max(0.8f, fbh / 720.0f);
     float t = std::max(2.0f, std::floor(2.0f * k + 0.5f));           // tamano de pixel de letra
@@ -3788,6 +3827,7 @@ static void fondoInicio(int fbw, int fbh, float k, float t, const char* sub) {
     hTexto(ti, (fbw - hAncho(ti, tp)) / 2.0f, 18 * k, tp, 1.0f, 0.88f, 0.35f);
     hTexto(sub, (fbw - hAncho(sub, t)) / 2.0f, 18 * k + 9 * tp + 6 * k, t, 0.85f, 0.88f, 0.95f);
 }
+#include "avatar.h"
 static void inicioDibujar(int fbw, int fbh) {
     float k = std::max(0.8f, fbh / 720.0f), t = std::max(2.0f, std::floor(2.0f * k + 0.5f));
     int hov = inicioHit(g_mx, g_my);
@@ -3796,9 +3836,10 @@ static void inicioDibujar(int fbw, int fbh) {
         hBoton(tituloRect(fbw, fbh, 0), k, 0.16f, 0.50f, 0.22f, hov == 0, "CREAR MUNDO", t * 1.6f);
         hBoton(tituloRect(fbw, fbh, 1), k, 0.14f, 0.30f, 0.52f, hov == 1, "MIS MUNDOS", t * 1.6f);
         hBoton(tituloRect(fbw, fbh, 2), k, 0.38f, 0.24f, 0.55f, hov == 2, "MULTIJUGADOR", t * 1.6f);
-        hBoton(tituloRect(fbw, fbh, 3), k, 0.45f, 0.14f, 0.14f, hov == 3, "SALIR", t * 1.6f);
-        hBoton(tituloRect(fbw, fbh, 4), k, 0.30f, 0.30f, 0.12f, hov == 4, SUB == 2 ? "MUNDO SUB 2 NORMAL (CAMBIAR)" : "MUNDO SUB 1 AMPLIO (CAMBIAR)", t * 0.95f);
-        if (!g_errorInicio.empty()) { MRect r4 = tituloRect(fbw, fbh, 4); hTexto(g_errorInicio.c_str(), r4.x, r4.y + r4.h + 8 * k, t, 1.0f, 0.5f, 0.45f); }
+        hBoton(tituloRect(fbw, fbh, 3), k, 0.55f, 0.35f, 0.12f, hov == 5, "AVATAR 3D", t * 1.6f);
+        hBoton(tituloRect(fbw, fbh, 4), k, 0.45f, 0.14f, 0.14f, hov == 3, "SALIR", t * 1.6f);
+        hBoton(tituloRect(fbw, fbh, 5), k, 0.30f, 0.30f, 0.12f, hov == 4, SUB == 2 ? "MUNDO SUB 2 NORMAL (CAMBIAR)" : "MUNDO SUB 1 AMPLIO (CAMBIAR)", t * 0.95f);
+        if (!g_errorInicio.empty()) { MRect r4 = tituloRect(fbw, fbh, 5); hTexto(g_errorInicio.c_str(), r4.x, r4.y + r4.h + 8 * k, t, 1.0f, 0.5f, 0.45f); }
         return;
     }
     fondoInicio(fbw, fbh, k, t, "MULTIJUGADOR - PARTIDAS EN TU WIFI");
@@ -3918,6 +3959,7 @@ static void leerArgs(int argc, char** argv) {   // --hospedar [puerto]   --unir 
         else if (a == "--unir" && i + 1 < argc) g_argUnir = argv[++i];
         else if (a == "--nombre" && i + 1 < argc) g_argNombre = argv[++i];
     }
+    avCargar();
     if (const char* e = std::getenv("RED_UNIR")) g_argUnir = e;
     if (std::getenv("RED_HOST")) g_argHost = true;
     if (const char* e = std::getenv("RED_NOMBRE")) g_argNombre = e;
@@ -4310,7 +4352,8 @@ static int juego_main() {
             glClearColor(0.42f, 0.62f, 0.90f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             g_hud.clear();
-            if (g_pantalla == 0) mundosDibujar(fbw, fbh); else inicioDibujar(fbw, fbh);
+            if (g_pantalla == 4) { avDibujar3D(fbw, fbh); g_hud.clear(); avDibujarUI(fbw, fbh); }
+            else if (g_pantalla == 0) mundosDibujar(fbw, fbh); else inicioDibujar(fbw, fbh);
             subirHud(fbw, fbh);
             glfwSwapBuffers(ventana);
         };
@@ -4408,10 +4451,11 @@ static int juego_main() {
     double tGuardado = glfwGetTime(), tMensaje = -10, tAgua = 0;
     int frame = 0, fpsCuenta = 0;
     double tFps = glfwGetTime(), tAnterior = glfwGetTime(), tAccion = 0;
-    int fps = 0, triDib = 0, mallasDib = 0;
+    int fps = 0, triDib = 0, mallasDib = 0, callsDib = 0;
     bool cargando = true;
 
     while (!glfwWindowShouldClose(ventana)) {
+        perf::inicioCuadro();
         g_tac.fbw = g_fbW; g_tac.fbh = g_fbH;
         g_tac.ui = g_menu || g_pausa || !g_capturado;
         g_tac.uiJuego = g_menu || g_pausa;
@@ -4573,7 +4617,7 @@ static int juego_main() {
             else std::snprintf(ib, sizeof ib, "RED: CONECTADO - %d JUGADORES", (int)g_red.rem.size() + 1);
             g_redInfo = ib;
         } else { g_vehCinematico = false; if (!g_red.error.empty()) g_redInfo = g_red.error; }
-        recogerMallas(subidasMax());     // (celular: pocas mallas por cuadro para evitar tirones)
+        { perf::Alcance _pa(perf::P_SUBIR); recogerMallas(subidasMax()); }     // (celular: pocas mallas por cuadro para evitar tirones)
 
         // ---- guardado (automatico cada 30 s, con F5, y al salir)
         if (g_guardarYa || ahora - tGuardado > 30.0) {
@@ -4673,23 +4717,35 @@ static int juego_main() {
                 g_aviso = "MORISTE: REAPARECES EN TU PUNTO"; g_avisoT = glfwGetTime();
             }
         }
+        { perf::Alcance _pa(perf::P_MOBS);
         if (!cargando) jefeTick(dt, ahora);
         if (!cargando) ovejasTick(dt, ahora, g_j.p.x, g_j.p.y, g_j.p.z, !g_modoLuna && !g_ck.activo && g_pantalla == 1);
         suenoTick(ahora);
         { std::vector<int> cog; sueltosTick(dt, g_j.p.x, g_j.p.y, g_j.p.z, ahora, cog);
           for (int id : cog) if (id >= 0 && id < 256) g_inv[id] = std::min(9999, g_inv[id] + 1); }
         neansTick(dt, ahora, g_j.p.x, g_j.p.y, g_j.p.z, !g_modoLuna && !g_ck.activo && !cargando && g_pantalla == 1, esDeNoche());
+        }
         // ---- camara
         V3 mira = {std::cos(g_j.pitch) * std::sin(g_j.yaw), std::sin(g_j.pitch), -std::cos(g_j.pitch) * std::cos(g_j.yaw)};
         V3 cam = {g_j.p.x, g_j.p.y + g_j.ojo, g_j.p.z};
         V3 camUp = {0, 1, 0};
         if (g_ck.activo) ckCamara(mira, cam, camUp);
         else if (pil) vehCamara(mira, cam, camUp);
+        else if (g_vista != 0) {                                      // tercera persona: la camara se aleja (y se acerca si hay un bloque detras)
+            const V3 dir = g_vista == 1 ? V3{-mira.x, -mira.y, -mira.z} : mira;
+            double t = 0.3;
+            for (; t < 4.0; t += 0.1) if (esSolido(leerCubito((int)std::floor((cam.x + dir.x * t) * SUB), (int)std::floor((cam.y + dir.y * t) * SUB), (int)std::floor((cam.z + dir.z * t) * SUB)))) break;
+            t = std::max(0.15, std::min(4.0, t - 0.25));
+            cam = {cam.x + dir.x * t, cam.y + dir.y * t, cam.z + dir.z * t};
+            if (g_vista == 2) mira = V3{-mira.x, -mira.y, -mira.z};
+        }
         int fbw, fbh;
         glfwGetFramebufferSize(ventana, &fbw, &fbh);
         g_fbW = fbw; g_fbH = fbh;
         glfwGetWindowSize(ventana, &g_winW, &g_winH);
         if (fbw < 1 || fbh < 1) { glfwSwapBuffers(ventana); continue; }
+        perf::marcar(perf::S_ACT); perf::gpuEmpezar(0);
+        const auto pfT0 = perf::ahora();
         float proy[16], vista[16], vp[16];
         matPerspectiva(proy, 1.22f + (g_ck.activo && g_ck.fase == 2 && !g_modoLuna ? (float)std::min(0.50, std::sqrt(g_ck.V.x * g_ck.V.x + g_ck.V.y * g_ck.V.y + g_ck.V.z * g_ck.V.z) / 2500.0 * 0.50) : 0.0f), (float)fbw / fbh, 0.05f, g_lodOn ? 1500.0f : 800.0f);
         matVista(vista, mira, camUp);
@@ -5193,7 +5249,7 @@ static int juego_main() {
         float sombraOn = 0.0f, solF = 0.0f;
         float solV[3] = {0, 1, 0};
         float SVP[16] = {};
-        const float SOMB_R = 100.0f, SOMB_D = 250.0f;
+        const float SOMB_R = 108.0f, SOMB_D = 250.0f;      // v88: radio +8 para cubrir el paso del centro
         {
             float th0 = (float)(g_hora * 6.2831853);
             float ax = std::cos(th0), ay = std::sin(th0), az = 0.30f, al = std::sqrt(ax * ax + ay * ay + az * az);
@@ -5213,20 +5269,28 @@ static int juego_main() {
                 double rl = std::sqrt(rx * rx + ry * ry + rz * rz); rx /= rl; ry /= rl; rz /= rl;
                 double ux = Ly * rz - Lz * ry, uy = Lz * rx - Lx * rz, uz = Lx * ry - Ly * rx;      // u = L x r
                 double texel = 2.0 * SOMB_R / pp.shRes;
+                // v88: el centro del mapa de sombras salta en pasos de ~8 bloques (multiplo del texel) en vez de en cada texel:
+                // antes se rehacia casi en cada cuadro al moverte (cientos de llamadas de dibujo extra); ahora solo al cruzar un paso
+                const double paso = std::max(texel, std::floor(8.0 / texel + 0.5) * texel);
                 double cx_ = cam.x * rx + cam.y * ry + cam.z * rz, cy_ = cam.x * ux + cam.y * uy + cam.z * uz;
-                double offX = cx_ - std::floor(cx_ / texel) * texel, offY = cy_ - std::floor(cy_ / texel) * texel;
+                double offX = cx_ - std::floor(cx_ / paso) * paso, offY = cy_ - std::floor(cy_ / paso) * paso;
                 // matriz (columna por columna): x=(r.p+offX)/R, y=(u.p+offY)/R, z=-(L.p)/D
                 SVP[0] = (float)(rx / SOMB_R); SVP[4] = (float)(ry / SOMB_R); SVP[8] = (float)(rz / SOMB_R); SVP[12] = (float)(offX / SOMB_R);
                 SVP[1] = (float)(ux / SOMB_R); SVP[5] = (float)(uy / SOMB_R); SVP[9] = (float)(uz / SOMB_R); SVP[13] = (float)(offY / SOMB_R);
-                SVP[2] = (float)(-Lx / SOMB_D); SVP[6] = (float)(-Ly / SOMB_D); SVP[10] = (float)(-Lz / SOMB_D); SVP[14] = 0.0f;
+                SVP[2] = (float)(-Lx / SOMB_D); SVP[6] = (float)(-Ly / SOMB_D); SVP[10] = (float)(-Lz / SOMB_D);
+                // v88b: la PROFUNDIDAD tambien queda fija al mundo (en pasos). Antes dependia de donde estaba la camara en cada cuadro, y el mapa
+                // guardado ya no coincidia al subir/bajar: las sombras parpadeaban (todo con sombra falsa por unos milisegundos) hasta rehacerlo
+                const double lcam = cam.x * Lx + cam.y * Ly + cam.z * Lz;
+                const double dsn = std::floor(lcam / paso) * paso;
+                SVP[14] = (float)(-(lcam - dsn) / SOMB_D);
                 SVP[3] = 0; SVP[7] = 0; SVP[11] = 0; SVP[15] = 1.0f;
                 // el mapa de sombras esta fijo al mundo (celdas de texel): solo se rehace si cambia la celda, se mueve el sol o pasan 4 cuadros
-                static long long shCx = 0, shCy = 0; static float shSol[3] = {9, 9, 9}; static int shEdad = 1000;
-                long long ncx = (long long)std::floor(cx_ / texel), ncy = (long long)std::floor(cy_ / texel);
+                static long long shCx = 0, shCy = 0, shCz = 0; static float shSol[3] = {9, 9, 9}; static int shEdad = 1000;
+                long long ncx = (long long)std::floor(cx_ / paso), ncy = (long long)std::floor(cy_ / paso), ncz = (long long)std::floor(lcam / paso);
                 float dsol = std::fabs(solV[0] - shSol[0]) + std::fabs(solV[1] - shSol[1]) + std::fabs(solV[2] - shSol[2]);
-                bool rehacer = ncx != shCx || ncy != shCy || dsol > 0.0004f || ++shEdad >= 4;
+                bool rehacer = ncx != shCx || ncy != shCy || ncz != shCz || dsol > 0.0004f || ++shEdad >= 12;
                 if (rehacer) {
-                shCx = ncx; shCy = ncy; shSol[0] = solV[0]; shSol[1] = solV[1]; shSol[2] = solV[2]; shEdad = 0;
+                shCx = ncx; shCy = ncy; shCz = ncz; shSol[0] = solV[0]; shSol[1] = solV[1]; shSol[2] = solV[2]; shEdad = 0;
                 glBindFramebuffer(GL_FRAMEBUFFER, pp.fboSh);
                 glViewport(0, 0, pp.shRes, pp.shRes);
                 glClear(GL_DEPTH_BUFFER_BIT);
@@ -5364,7 +5428,7 @@ static int juego_main() {
         if (g_lodOn && !g_lodEsp) {   // ---- mundo lejano: se dibuja primero con su propia proyeccion y luego se borra la profundidad
             for (auto& kv : g_lod) if (kv.second->estado.load(std::memory_order_acquire) == 1) { lodSubir(*kv.second); break; }
             lodReemplazar();
-            if (frame % 6 == 0) { lodProcesarRegen(); lodActualizar(cam.x, cam.z); }
+            if (frame % 6 == 0) { perf::Alcance _pa(perf::P_LOD); lodProcesarRegen(); lodActualizar(cam.x, cam.z); }
             float projL[16], vpL[16], plL[6][4];
             matPerspectiva(projL, 1.22f, (float)fbw / fbh, 1.5f, 30000.0f);
             matMul(vpL, projL, vista);
@@ -5526,8 +5590,13 @@ static int juego_main() {
         };
         int ocluidos = 0;
         std::vector<Chunk*> visibles;
+        perf::trozo(perf::P_CIELO, pfT0);
+        const auto pfT1 = perf::ahora();
         std::unordered_map<int64_t, bool> colOk;
-        std::unordered_map<int64_t, double> colMinH;
+        // v88: la altura minima de cada columna no cambia (el terreno es fijo): se guarda entre cuadros (antes se recalculaba con 25 consultas de ruido por columna en CADA cuadro)
+        static std::unordered_map<int64_t, double> colMinH;
+        static bool lunaPrev = false;
+        if (lunaPrev != g_modoLuna || colMinH.size() > 40000) { colMinH.clear(); lunaPrev = g_modoLuna; }
         std::unordered_map<int64_t, float> colSup3;
         const double tam = CS * VS;
         for (auto& kv : g_mapa) {
@@ -5601,6 +5670,8 @@ static int juego_main() {
             visibles.push_back(c);
         }
         g_ocluidosN = ocluidos;
+        perf::trozo(perf::P_CULL, pfT1);
+        const auto pfT2 = perf::ahora();
         triDib = 0; mallasDib = (int)visibles.size();
         // de cerca a lejos: el z-buffer descarta pronto lo tapado (menos pixeles pintados); el agua se pinta al reves (de lejos a cerca)
         std::sort(visibles.begin(), visibles.end(), [&](Chunk* a, Chunk* b) {
@@ -5608,6 +5679,7 @@ static int juego_main() {
             double bx = (b->cx + 0.5) * tam - cam.x, by = (b->cy + 0.5) * tam - cam.y, bz = (b->cz + 0.5) * tam - cam.z;
             return ax * ax + ay * ay + az * az < bx * bx + by * by + bz * bz;
         });
+        perf::trozo(perf::P_ORDEN, pfT2); perf::marcar(perf::S_PREP);
         auto dibujar = [&](bool agua) {
             for (size_t vi = 0; vi < visibles.size(); vi++) {
                 Chunk* c = visibles[agua ? visibles.size() - 1 - vi : vi];
@@ -5618,15 +5690,21 @@ static int juego_main() {
                 glBindTexture(GL_TEXTURE_3D, c->gLuz.tex);
                 glBindVertexArray(g.vao);
                 glDrawElements(GL_TRIANGLES, g.n, GL_UNSIGNED_INT, (const void*)0);
-                triDib += g.n / 3;
+                triDib += g.n / 3; callsDib++;
             }
         };
+        callsDib = 0;
         dibujar(false);
+        perf::marcar(perf::S_TERR); perf::gpuTerminar(); perf::gpuEmpezar(1);
         const float fogAv = (aguaFogA > 0 && !camAgua) ? aguaFogA : (float)(g_lodOn ? LOD_FOG_MAX * 0.55 / 0.60 : VIEW_BLOCKS) * 0.60f, fogBv = (aguaFogB > 0 && !camAgua) ? aguaFogB : (float)(g_lodOn ? LOD_FOG_MAX : VIEW_BLOCKS) * 0.97f;
         glDisable(GL_CULL_FACE);
         vehDibujar(vp, cam, solV, solF, skyMul, gfx ? 1.0f : 0.0f, cielo, fogAv, fogBv, false);
         ckDibujar(vp, cam, solV, solF, skyMul, gfx ? 1.0f : 0.0f, cielo, fogAv, fogBv, false);
         jugDibujar(vp, cam.x, cam.y, cam.z, solV, solF, skyMul, cielo, fogAv, fogBv);
+        if (g_vista != 0 && !pil && !g_ck.activo && !cargando) {
+            avYoActualizar(dt, g_j.p.x, g_j.p.y, g_j.p.z, g_j.yaw, g_j.pitch, g_golpea, g_j.volar, objetoEnMano());
+            avDibujarYo(vp, cam.x, cam.y, cam.z, solV, solF, skyMul, cielo, fogAv, fogBv);
+        }
         if (g_modoLuna) jefeDibujar(vp, cam.x, cam.y, cam.z, solV, solF, jefeSkyMul(skyMul), cielo, fogAv, fogBv, ahora);
         else mobsDibujar(vp, cam.x, cam.y, cam.z, solV, solF, skyMul, cielo, fogAv, fogBv, ahora);
         g_etiquetas.clear();
@@ -5876,7 +5954,8 @@ static int juego_main() {
             float tY = std::tan(1.22f * 0.5f), tX = tY * (float)fbw / fbh;
             ppComponer(pp, vaoVacio, fbw, fbh, tX, tY, 0.05f, g_lodOn ? 1500.0f : 800.0f, true);
         }
-        if (!pil && !cargando && !g_menu) jugDibujarMano(vp, cam.x, cam.y, cam.z, g_j.yaw, g_j.pitch, objetoEnMano(), g_golpea, dt, solV, solF, skyMul, cielo);
+        if (!pil && !cargando && !g_menu && g_vista == 0) jugDibujarMano(vp, cam.x, cam.y, cam.z, g_j.yaw, g_j.pitch, objetoEnMano(), g_golpea, dt, solV, solF, skyMul, cielo);
+        perf::marcar(perf::S_RESTO);
         // ---- HUD (texto, barra de materiales, menu, mira)
         {
             g_hud.clear();
@@ -5884,10 +5963,23 @@ static int juego_main() {
             suenoDibujar(fbw, fbh, ahora);
             fuegoDibujar(fbw, fbh, ahora);
             if (g_pausa) pausaDibujar(fbw, fbh);
+            if (perf::visible) perfDibujar(fbw, fbh);
             subirHud(fbw, fbh);
+        }
+        perf::marcar(perf::S_HUD);
+        perf::gpuTerminar();
+        {   // contadores para el panel
+            perf::Cnt& c = perf::cnt;
+            c.llamadas = callsDib; c.tri = triDib; c.visibles = mallasDib; c.tapados = g_ocluidosN; c.chunks = (int)g_mapa.size(); c.lodTiles = (int)g_lod.size();
+            c.genPend = g_genPend.load(); c.meshPend = g_meshPend.load(); c.lodPend = g_lodPend.load();
+            { std::lock_guard<std::mutex> lk(g_hechoM); c.hechos = (int)g_hecho.size(); }
+            { std::lock_guard<std::mutex> lk(g_pool.m); c.cola = (int)g_pool.cola.size(); }
+            c.ovejas = (int)g_ovejas.size(); c.neans = (int)g_neans.size(); c.sueltos = (int)g_sueltos.size(); c.hilos = (int)g_pool.hilos.size();
+            c.w = fbw; c.h = fbh; c.vsync = g_vsync;
         }
 
         glfwSwapBuffers(ventana);
+        perf::marcar(perf::S_SWAP);
 
         // ---- informacion en el titulo de la ventana
         if (ahora - tFps >= 0.5) {
