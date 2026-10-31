@@ -1164,8 +1164,9 @@ static const char* NOMBRES_HERR[HERR_N] = {"PICO MADERA", "PICO PIEDRA", "PICO H
 // ---- v81: objetos nuevos del survival (ids libres 242..249, 254, 255): materiales, kit del cohete, armadura y armas
 static const int ID_ACERO = 242, ID_COMBUS = 243, ID_KITCOH = 244, ID_CASCO = 245, ID_PECHERA = 246, ID_BOTAS = 247,
                  ID_ESPADA = 248, ID_ESPADAP = 249, ID_MARTILLO = 254, ID_ESCUDO = 255;
+static const int ID_CARNE = 207, ID_LANA = 208, ID_CAMA = 209;   // v84: oveja y cama
 static const int ID_ARCO = 200, ID_FLECHA = 201, ID_HACHAB = 202, ID_LANZA = 203, ID_MAZA = 204, ID_DAGA = 205, ID_ESPADAL = 206;   // v82: armas medievales
-static inline bool esObjNuevo(int id) { return (id >= 200 && id <= 206) || (id >= 242 && id <= 249) || id == 254 || id == 255; }
+static inline bool esObjNuevo(int id) { return (id >= 200 && id <= 209) || (id >= 242 && id <= 249) || id == 254 || id == 255; }
 static inline bool esArma(int id) { return id == ID_ESPADA || id == ID_ESPADAP || id == ID_MARTILLO || id == ID_HACHAB || id == ID_LANZA || id == ID_MAZA || id == ID_DAGA || id == ID_ESPADAL; }
 struct ArmaInfo { float dano; double cd, alcance; };
 static ArmaInfo armaInfo(int id) {   // dano, segundos entre golpes y alcance
@@ -1183,6 +1184,7 @@ static const char* nombreNuevo(int id) {
         case 249: return "ESP PLASMA"; case 254: return "MARTILLO"; case 255: return "ESCUDO";
         case 200: return "ARCO"; case 201: return "FLECHA"; case 202: return "HACHA BATALLA"; case 203: return "LANZA";
         case 204: return "MAZA"; case 205: return "DAGA"; case 206: return "ESPADA LARGA";
+        case 207: return "CARNE"; case 208: return "LANA"; case 209: return "CAMA";
     }
     return "";
 }
@@ -1244,6 +1246,7 @@ static const std::vector<Receta>& recetas() {
         r.push_back({ID_ESPADAP, 1, ALUMINIO, 8, COBRE, 6, TITANIO, 2});
         r.push_back({ID_MARTILLO, 1, ID_ACERO, 24, MADERA, 8, AZUFRE, 4});
         r.push_back({ID_ESCUDO, 1, ID_ACERO, 16, MADERA, 8, 0, 0});
+        r.push_back({ID_CAMA, 1, ID_LANA, 3, MADERA, 24, 0, 0});            // v84: cama = 3 lana + 24 madera
         r.push_back({ID_POLVORA, 2, SALITRE, 3, CARBON, 1, AZUFRE, 1});     // v51: 3 salitre + 1 carbon + 1 azufre = 2 polvora
         r.push_back({TNT, 8, ID_POLVORA, 4, 0, 0, 0, 0});                 // 4 polvoras = 1 bloque de TNT (8 cubitos)
     }
@@ -2376,6 +2379,7 @@ constexpr bool SOLO_VISIBLE = false;
 #include "cohete.h"
 #include "jugadores.h"
 #include "jefe.h"
+#include "mobs.h"
 
 
 // ---------------------------------------------------------------- mundos (menu que aparece al iniciar)
@@ -2642,6 +2646,7 @@ static void menuReconstruir() {
     if (!g_survival) {
         for (int i = 0; i < NTIPOS_MENU; i++) if (menuTipo(i) != TNT_ENC) g_menuItems.push_back(menuTipo(i));
         for (int t = 0; t < HERR_N; t++) g_menuItems.push_back(HERR_BASE + t);
+        g_menuItems.push_back(ID_CAMA);
     } else {
         for (int id = 1; id < 256; id++) if (g_inv[id] > 0 && !(id >= AGUA_F1 && id <= AGUA_F8) && id != AGUA) g_menuItems.push_back(id);
     }
@@ -3032,7 +3037,7 @@ static const float ICON_NEW[NTIPOS - NIEVE][3] = {{0.93f, 0.95f, 0.99f}, {0.60f,
 static inline const float* iconColor(int id) { return id >= NIEVE ? ICON_NEW[id - NIEVE] : ICON_C[id]; }
 // icono de un material (o de la herramienta "destruir" en el hueco 0)
 static void hIconoNuevo(int id, float x, float y, float c) {   // v81: iconos de los objetos nuevos (cuadricula de 6x6)
-    static const char* P[17][6] = {
+    static const char* P[20][6] = {
         {"......", ".####.", "#hhhh#", "######", ".####.", "......"},            // acero: lingote
         {"..oo..", ".####.", ".#rr#.", ".#rr#.", ".####.", "......"},            // combustible: bidon
         {"..W...", ".WWW..", ".WRW..", ".WWW..", "WWWWW.", ".O.O.."},            // kit cohete
@@ -3049,7 +3054,10 @@ static void hIconoNuevo(int id, float x, float y, float c) {   // v81: iconos de
         {"...bbb", "...bb.", "..h...", ".h....", "h.....", "h....."},            // lanza
         {"..CC..", ".CCCC.", ".CCCC.", "..CC..", "..h...", "..h..."},            // maza
         {"....b.", "...b..", "..b...", ".h....", "h.h...", "......"},            // daga
-        {"....bb", "...bbb", "..bbb.", ".bbb..", "hbb...", "hh...."}};            // espada larga
+        {"....bb", "...bbb", "..bbb.", ".bbb..", "hbb...", "hh...."},             // espada larga
+        {"......", ".MMM..", "MMmMM.", "MMMMM.", ".MMM.s", "....s."},            // carne
+        {"......", ".WWW..", "WWWWW.", "WWWWW.", ".WWW..", "......"},            // lana
+        {"h.....", "hWW...", "hWWWW.", "hWWWWh", "hhhhhh", "h....h"}};            // cama
     const int k = id == 254 ? 8 : id == 255 ? 9 : id >= 242 ? id - 242 : 10 + (id - 200);
     float cr = 0.62f, cg = 0.66f, cb = 0.72f, br = 0.78f, bg = 0.80f, bb = 0.84f;
     if (id == 249) { br = 0.30f; bg = 0.95f; bb = 1.0f; }                    // plasma
@@ -3058,12 +3066,14 @@ static void hIconoNuevo(int id, float x, float y, float c) {   // v81: iconos de
         char ch = P[k][j][i];
         if (ch == '.') continue;
         float r = cr, g = cg, b = cb;
-        if (ch == 'h') { r = 0.42f; g = 0.28f; b = 0.16f; }
+        if (ch == 'h') { r = 0.42f; g = 0.28f; b = 0.16f; if (id == 209) { r = 0.74f; g = 0.52f; b = 0.29f; } }
         else if (ch == 'b') { r = br; g = bg; b = bb; }
         else if (ch == 'v') { r = 0.25f; g = 0.80f; b = 1.0f; }
         else if (ch == 's' || ch == 'f') { r = 0.92f; g = 0.92f; b = 0.90f; }
         else if (ch == 'p') { r = 0.70f; g = 0.72f; b = 0.76f; }
         else if (ch == 'W') { r = 0.92f; g = 0.93f; b = 0.95f; }
+        else if (ch == 'M') { r = 0.82f; g = 0.28f; b = 0.28f; }
+        else if (ch == 'm') { r = 0.96f; g = 0.62f; b = 0.60f; }
         else if (ch == 'R') { r = 0.85f; g = 0.15f; b = 0.12f; }
         else if (ch == 'O') { r = 1.0f; g = 0.60f; b = 0.12f; }
         else if (ch == 'o') { r = 0.95f; g = 0.50f; b = 0.10f; }
@@ -3769,6 +3779,25 @@ static void inicioDibujar(int fbw, int fbh) {
     if (!g_errorInicio.empty()) hTexto(g_errorInicio.c_str(), b.x0 + b.w * 0.32f + 14 * k, fbh - 108 * k + 14 * k, t, 1.0f, 0.5f, 0.45f);
 }
 
+// ---- dormir en la cama (v84): la pantalla se oscurece, pasa la noche y amanece a las 6 AM
+static double g_suenoT0 = -1; static bool g_suenoHecho = false;
+static bool esDeNoche() { return g_hora >= 0.54; }       // desde las 19:00 hasta las 6:00 (g_hora 0 = 6 AM)
+static bool esSolidoMob(int x, int y, int z) { uint8_t t = leerCubito(x, y, z); return t != AIRE && !esAgua(t) && t != LAVA; }
+static void suenoTick(double ahora) {
+    if (g_suenoT0 < 0) return;
+    const double t = ahora - g_suenoT0;
+    if (t >= 1.2 && !g_suenoHecho) { g_suenoHecho = true; g_hora = 0.0; g_vida = std::min(20.0f, g_vida + 6.0f); }
+    if (t > 2.8) g_suenoT0 = -1;
+}
+static void suenoDibujar(int fbw, int fbh, double ahora) {
+    if (g_suenoT0 < 0) return;
+    const double t = ahora - g_suenoT0;
+    float a = t < 0.8 ? (float)(t / 0.8) : (t < 2.0 ? 1.0f : (float)(1.0 - (t - 2.0) / 0.8));
+    a = std::max(0.0f, std::min(1.0f, a));
+    hRect(0, 0, (float)fbw, (float)fbh, 0.01f, 0.01f, 0.03f, a);
+    if (a > 0.6f) { const char* z = g_suenoHecho ? "BUENOS DIAS" : "ZZZ..."; float px = std::max(3.0f, fbh / 120.0f); hTexto(z, (fbw - hAncho(z, px)) / 2.0f, fbh * 0.45f, px, 0.9f, 0.9f, 1.0f); }
+}
+
 static void pausaDibujar(int fbw, int fbh) {
     float k = std::max(0.8f, fbh / 720.0f), t = std::max(2.0f, std::floor(2.0f * k + 0.5f));
     hRect(0, 0, (float)fbw, (float)fbh, 0, 0, 0, 0.58f);
@@ -4276,6 +4305,7 @@ static int juego_main() {
     std::sort(offsets.begin(), offsets.end(), [](const Off& a, const Off& b) { return a.d2 < b.d2; });
 
     escanearEditados();
+    camasCargar();
     {   // punto de inicio: lo mas cerca del centro que quede en tierra firme (no en un lago)
         double sx = 0.5, sz = 0.5;
         bool hallado = false;
@@ -4312,7 +4342,7 @@ static int juego_main() {
         g_survival = true; g_spawnOk = true; g_spawnS[0] = g_j.p.x; g_spawnS[1] = g_j.p.y; g_spawnS[2] = g_j.p.z; g_j.volar = false;
         if (std::atoi(sv) > 1) { g_vida = 13; g_inv[MADERA] = 60; g_inv[PIEDRA] = 30; g_inv[HIERRO] = 25; g_inv[ARENA] = 8; g_inv[CARBON] = 3; g_inv[PASTO] = 12; g_inv[HERR_BASE] = 1; g_inv[HERR_BASE + 5] = 1; g_barra[1] = HERR_BASE; g_barra[2] = PASTO; g_barra[3] = MADERA; g_barra[4] = HERR_BASE + 5; g_barra[0] = VACIO; aplicarSel(); }
     }
-    if (std::getenv("PRUEBA_OBJ")) { for (int id : {200, 201, 202, 203, 204, 205, 206, 242, 243, 244, 245, 246, 247, 248, 249, 254, 255}) g_inv[id] = 50; if (std::atoi(std::getenv("PRUEBA_OBJ")) > 1) g_pagina = std::atoi(std::getenv("PRUEBA_OBJ")) - 1; g_recPag = std::getenv("PRUEBA_REC") ? std::atoi(std::getenv("PRUEBA_REC")) : 0; }   // (pruebas) objetos nuevos
+    if (std::getenv("PRUEBA_OBJ")) { for (int id : {200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 242, 243, 244, 245, 246, 247, 248, 249, 254, 255}) g_inv[id] = 50; if (std::atoi(std::getenv("PRUEBA_OBJ")) > 1) g_pagina = std::atoi(std::getenv("PRUEBA_OBJ")) - 1; g_recPag = std::getenv("PRUEBA_REC") ? std::atoi(std::getenv("PRUEBA_REC")) : 0; }   // (pruebas) objetos nuevos
     if (const char* em = std::getenv("MATERIAL")) { g_barra[g_sel] = std::atoi(em); aplicarSel(); }   // (pruebas)
     std::printf("Carpeta del mundo: %s%s\n", g_dir.c_str(), jugadorCargado ? " (mundo anterior cargado)" : " (mundo nuevo)");
     double tGuardado = glfwGetTime(), tMensaje = -10, tAgua = 0;
@@ -4583,6 +4613,8 @@ static int juego_main() {
             }
         }
         if (!cargando) jefeTick(dt, ahora);
+        if (!cargando) ovejasTick(dt, ahora, g_j.p.x, g_j.p.y, g_j.p.z, !g_modoLuna && !g_ck.activo && g_pantalla == 1);
+        suenoTick(ahora);
         // ---- camara
         V3 mira = {std::cos(g_j.pitch) * std::sin(g_j.yaw), std::sin(g_j.pitch), -std::cos(g_j.pitch) * std::cos(g_j.yaw)};
         V3 cam = {g_j.p.x, g_j.p.y + g_j.ojo, g_j.p.z};
@@ -4642,6 +4674,64 @@ static int juego_main() {
         double cdAcc = 0.18;
         if (g_survival && izq && golpe.hay) cdAcc = survCooldown(leerCubito(golpe.x, golpe.y, golpe.z), g_material);
         static double tMelee = -10;
+        {   // v84: golpear ovejas con el clic izquierdo (no rompe el bloque de atras)
+            static double tOv = -10;
+            if (izq && !g_menu && !g_modoLuna && g_material != ID_ARCO && !g_ck.activo) {
+                const ArmaInfo ai0 = armaInfo(g_material);
+                const double alc = esArma(g_material) ? std::max(4.5, ai0.alcance) : 4.5;
+                double dOv = 0; const int oi = ovejaApuntada(cam, norm(mira), alc, &dOv);
+                if (oi >= 0) {
+                    double dBl = 1e9;
+                    if (golpe.hay) { const double cx_ = (golpe.x + 0.5) / SUB - cam.x, cy_ = (golpe.y + 0.5) / SUB - cam.y, cz_ = (golpe.z + 0.5) / SUB - cam.z; dBl = std::sqrt(cx_ * cx_ + cy_ * cy_ + cz_ * cz_) - 0.4; }
+                    if (dOv < dBl) {
+                        izq = false;
+                        const double cd = esArma(g_material) ? ai0.cd : 0.45;
+                        if (ahora - tOv > cd) {
+                            tOv = ahora;
+                            const double dano = esArma(g_material) && !((g_material == ID_ESPADAP || g_material == ID_MARTILLO) && g_survival && g_inv[0] == 0) ? ai0.dano : (esHerr(g_material) ? 4.0 : 2.0);
+                            int lana = 0, carne = 0;
+                            if (ovejaGolpear(oi, dano, g_j.p.x, g_j.p.z, ahora, &lana, &carne)) {
+                                g_inv[ID_LANA] = std::min(9999, g_inv[ID_LANA] + lana); g_inv[ID_CARNE] = std::min(9999, g_inv[ID_CARNE] + carne);
+                                char mm[64]; std::snprintf(mm, sizeof mm, "+%d LANA  +%d CARNE", lana, carne); aviso(mm);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        const int camaT = (!g_menu && !g_modoLuna && !g_ck.activo) ? camaApuntada(cam, norm(mira), 5.0) : -1;
+        if (camaT >= 0 && der && ahora - tAccion > 0.6) {            // clic derecho en la cama: dormir
+            tAccion = ahora;
+            if (g_red.cli) aviso("EN PARTIDA AJENA SOLO EL ANFITRION CAMBIA LA HORA");
+            else if (!esDeNoche()) aviso("SOLO PUEDES DORMIR DE NOCHE");
+            else if (g_suenoT0 < 0) {
+                g_suenoT0 = ahora; g_suenoHecho = false;
+                g_spawnS[0] = g_camas[camaT].x; g_spawnS[1] = g_camas[camaT].y + 0.3; g_spawnS[2] = g_camas[camaT].z; g_spawnOk = true;   // reapareces en tu cama
+            }
+        } else
+        if (camaT >= 0 && izq && ahora - tAccion > 0.5) {            // clic izquierdo: recoger la cama
+            tAccion = ahora;
+            g_camas.erase(g_camas.begin() + camaT); camasGuardar();
+            if (g_survival) g_inv[ID_CAMA] = std::min(9999, g_inv[ID_CAMA] + 1);
+            aviso("CAMA RECOGIDA");
+        } else
+        if (der && g_material == ID_CAMA && !g_menu && !g_modoLuna && golpe.hay && ahora - tAccion > 0.5 && (!g_survival || g_inv[ID_CAMA] > 0)) {   // poner la cama
+            tAccion = ahora;
+            const double bx = (std::floor(golpe.px / (double)SUB) + 0.5), bz = (std::floor(golpe.pz / (double)SUB) + 0.5), by = golpe.py / (double)SUB;
+            bool ok = esSolidoMob(golpe.px, golpe.py - 1, golpe.pz);
+            for (auto& c : g_camas) if (std::fabs(c.x - bx) < 1.2 && std::fabs(c.z - bz) < 1.2 && std::fabs(c.y - by) < 1.0) ok = false;
+            if (!ok) aviso("PON LA CAMA SOBRE EL SUELO, LEJOS DE OTRA CAMA");
+            else {
+                int d = (int)std::lround((g_j.yaw + 3.14159265) / 1.5707963); d = ((d % 4) + 4) % 4;
+                g_camas.push_back({bx, by, bz, d}); camasGuardar();
+                if (g_survival) g_inv[ID_CAMA]--;
+            }
+        } else
+        if (der && g_material == ID_CARNE && !g_menu && ahora - tAccion > 0.7 && g_survival && g_inv[ID_CARNE] > 0) {   // comer carne
+            tAccion = ahora;
+            if (g_vida >= 20.0f) aviso("YA ESTAS LLENO");
+            else { g_inv[ID_CARNE]--; g_vida = std::min(20.0f, g_vida + 6.0f); aviso("COMISTE CARNE (+3 CORAZONES)"); }
+        } else
         if (izq && g_material == ID_ARCO && !g_menu && (!g_survival || g_inv[ID_ARCO] > 0)) {   // v82: arco y flechas
             static double tArco = -10;
             if (ahora - tArco > 0.7) {
@@ -4771,6 +4861,19 @@ static int juego_main() {
         if (std::getenv("DBGINV") && frame % 5 == 0) std::printf("INV cm=%.1f vy=%.1f suelo=%d dt=%.4f f=%d arena=%d tierra=%d pasto=%d piedra=%d pico_p=%d vida=%.1f y=%.1f\n", g_caidaMax, g_j.v.y, (int)g_j.suelo, dt, frame, g_inv[ARENA], g_inv[TIERRA], g_inv[PASTO], g_inv[PIEDRA], g_inv[HERR_BASE + 1], g_vida, g_j.p.y);
         if (const char* fc2 = std::getenv("CAIDA")) if (frame == std::atoi(fc2)) g_j.p.y += 14;   // (pruebas) soltarte desde 14 bloques
         if (const char* pm = std::getenv("PRUEBA_MENU")) if (frame == 40) { abrirMenu(ventana); g_menuPag = std::atoi(pm); if (std::getenv("PRUEBA_OBJ") && std::atoi(std::getenv("PRUEBA_OBJ")) > 1) g_pagina = 1; menuReconstruir(); }   // (pruebas) abre el menu en esa pagina
+        if (std::getenv("PRUEBA_OVEJA") && std::atoi(std::getenv("PRUEBA_OVEJA")) >= 3 && frame == 200) {
+            const double fx = std::sin(g_j.yaw), fz = -std::cos(g_j.yaw);
+            if (std::atoi(std::getenv("PRUEBA_OVEJA")) == 3) { Oveja o; o.x = g_j.p.x + fx * 2.5; o.z = g_j.p.z + fz * 2.5; o.y = alturaTerreno(o.x, o.z) + 0.3; o.yaw = g_j.yaw + 3.14; o.tSig = 1e9; g_ovejas.push_back(o); }
+            else { double bx = g_j.p.x + fx * 2.5, bz = g_j.p.z + fz * 2.5; g_camas.push_back({std::floor(bx) + 0.5, alturaTerreno(bx, bz), std::floor(bz) + 0.5, 1}); }
+        } else
+        if (std::getenv("PRUEBA_OVEJA") && frame == 200) {   // (pruebas) dos ovejas y una cama delante
+            const double fx = std::sin(g_j.yaw), fz = -std::cos(g_j.yaw), rx = -fz, rz = fx;
+            for (int i = 0; i < 2; i++) {
+                Oveja o; o.x = g_j.p.x + fx * 4.5 + rx * (i ? 1.3 : -1.3); o.z = g_j.p.z + fz * 4.5 + rz * (i ? 1.3 : -1.3);
+                o.y = alturaTerreno(o.x, o.z) + 0.3; o.yaw = g_j.yaw + 3.14159 + (i ? 0.5 : -0.5); o.tipo = i; o.tSig = 1e9; g_ovejas.push_back(o);
+            }
+            if (std::atoi(std::getenv("PRUEBA_OVEJA")) > 1) { double bx = g_j.p.x + fx * 5.0 - rx * 3.2, bz = g_j.p.z + fz * 5.0 - rz * 3.2; g_camas.push_back({std::floor(bx) + 0.5, alturaTerreno(bx, bz), std::floor(bz) + 0.5, 1}); }
+        }
         if (const char* pt = std::getenv("PRUEBA_TNT")) if (frame == std::atoi(pt)) {   // (pruebas) cubo de TNT delante, encendido a 1 s
             std::vector<ChunkP> su;
             int bx = (int)std::floor((g_j.p.x + std::sin(g_j.yaw) * 7.0) * SUB), bz = (int)std::floor((g_j.p.z - std::cos(g_j.yaw) * 7.0) * SUB);
@@ -5430,6 +5533,7 @@ static int juego_main() {
         ckDibujar(vp, cam, solV, solF, skyMul, gfx ? 1.0f : 0.0f, cielo, fogAv, fogBv, false);
         jugDibujar(vp, cam.x, cam.y, cam.z, solV, solF, skyMul, cielo, fogAv, fogBv);
         if (g_modoLuna) jefeDibujar(vp, cam.x, cam.y, cam.z, solV, solF, jefeSkyMul(skyMul), cielo, fogAv, fogBv, ahora);
+        else mobsDibujar(vp, cam.x, cam.y, cam.z, solV, solF, skyMul, cielo, fogAv, fogBv, ahora);
         g_etiquetas.clear();
         for (auto& kv : g_red.rem) if (kv.second.visto) {       // nombres sobre la cabeza
             const Remoto& m = kv.second;
@@ -5682,6 +5786,7 @@ static int juego_main() {
         {
             g_hud.clear();
             hdibujar(fbw, fbh, fps, cargando, ahora - tMensaje < 3.0, g_j.p.x, g_j.p.y, g_j.p.z);
+            suenoDibujar(fbw, fbh, ahora);
             if (g_pausa) pausaDibujar(fbw, fbh);
             subirHud(fbw, fbh);
         }
