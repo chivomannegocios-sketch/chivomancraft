@@ -14,7 +14,7 @@
 #include <functional>
 #include <vector>
 
-enum TId { T_SALTO, T_ROMPER, T_PONER, T_VOLAR, T_MENU, T_PAUSA, T_BAJAR, T_PINCEL, T_G, T_H, T_CAM, T_Q, T_E, T_GASM, T_GASL, T_FRENO, T_Z, T_C };
+enum TId { T_SALTO, T_ROMPER, T_PONER, T_VOLAR, T_MENU, T_PAUSA, T_BAJAR, T_PINCEL, T_G, T_H, T_CAM, T_Q, T_E, T_GASM, T_GASL, T_FRENO, T_Z, T_C, T_CHAT, T_SOLTAR, T_HORA, T_GUARDAR, T_KB, T_ENVIAR };
 // codigos de tecla (iguales a los de GLFW)
 enum { TK_SPACE = 32, TK_ESC = 256, TK_SHIFT = 340, TK_CTRL = 341, TK_TAB = 258, TK_W = 87, TK_A = 65, TK_S = 83, TK_D = 68,
        TK_F = 70, TK_E = 69, TK_B = 66, TK_G = 71, TK_H = 72, TK_Q = 81, TK_Z = 90, TK_C = 67, TK_1 = 49 };
@@ -29,6 +29,9 @@ struct Tactil {
     bool pil = false;       // pilotando
     bool extra = false;     // herramienta con Z / C (spray, rueda)
     bool volando = false;
+    bool chat = false;      // escribiendo en el chat (el juego pide teclado)
+    bool texto = false;     // se necesita el teclado del telefono (chat o direccion IP)
+    bool pedirKb = false;   // el jugador toco el boton TECLADO (la plataforma lo muestra de nuevo)
     bool activo = false;    // se uso la pantalla tactil alguna vez
     bool teclas[512];
     bool raton[2];
@@ -39,6 +42,7 @@ struct Tactil {
     std::function<void(int)> alTecla;
     std::function<void(double, double)> alCursor;
     std::function<void(double)> alScroll;
+    std::function<void(unsigned)> alChar;     // caracter escrito con el teclado del telefono
     std::function<void(int, int)> alBoton;    // boton (0 izq, 1 der), accion (1 pulsar, 0 soltar)
 
     Tactil() { std::memset(teclas, 0, sizeof teclas); raton[0] = raton[1] = false; }
@@ -50,7 +54,14 @@ struct Tactil {
         btns.clear();
         float r = radio(), W = (float)fbw, H = (float)fbh;
         auto add = [&](int id, const char* t, float x, float y, float rr, int tecla, bool mant) { btns.push_back({id, t, x, y, rr, tecla, mant}); };
+        if (chat) {       // escribiendo: botones arriba, el teclado ocupa la mitad de abajo
+            add(T_ENVIAR, "ENVIAR", W - 1.3f * r, 0.9f * r, 0.8f * r, 257, false);
+            add(T_KB, "TECLADO", W - 3.3f * r, 0.9f * r, 0.8f * r, -1, false);
+            add(T_PAUSA, "CERRAR", W - 5.3f * r, 0.9f * r, 0.8f * r, TK_ESC, false);
+            return;
+        }
         if (ui) {
+            if (texto) { add(T_ENVIAR, "OK", W - 1.3f * r, 0.9f * r, 0.8f * r, 257, false); add(T_KB, "TECLADO", W - 3.3f * r, 0.9f * r, 0.8f * r, -1, false); }
             if (uiJuego) add(T_PAUSA, "ATRAS", W - 1.3f * r, 0.9f * r, 0.8f * r, TK_ESC, false);
             return;
         }
@@ -65,6 +76,10 @@ struct Tactil {
             add(T_Q, "Q", W - 5.0f * r, H - 5.2f * r, r, TK_Q, true);
             return;
         }
+        add(T_CHAT, "CHAT", W - 1.0f * r, 2.4f * r, 0.7f * r, 257, false);                  // chat y comandos (abre el teclado)
+        add(T_SOLTAR, "SOLTAR", W - 2.6f * r, 2.4f * r, 0.7f * r, TK_Q, false);             // Q: botar el objeto elegido
+        add(T_HORA, "HORA", W - 4.2f * r, 2.4f * r, 0.7f * r, 84, false);                   // T: cambiar la hora
+        add(T_GUARDAR, "GUARDAR", W - 5.8f * r, 2.4f * r, 0.7f * r, 294, false);            // F5
         add(T_MENU, "MENU", W - 2.6f * r, 0.8f * r, 0.7f * r, TK_E, false);
         add(T_VOLAR, "VOLAR", W - 4.2f * r, 0.8f * r, 0.7f * r, TK_F, false);
         add(T_PINCEL, "PINCEL", W - 5.8f * r, 0.8f * r, 0.7f * r, TK_B, false);
@@ -141,10 +156,12 @@ struct Tactil {
         int b = hitBtn(x, y);
         if (b >= 0) {
             d->rol = 3; d->btn = btns[b].id;
+            if (btns[b].id == T_KB) pedirKb = true;
             if (!btns[b].mantener && btns[b].tecla >= 0 && alTecla) alTecla(btns[b].tecla);
             recalc();
             return;
         }
+        if (chat) { d->rol = 0; pedirKb = true; return; }       // tocar en cualquier lado vuelve a mostrar el teclado
         if (ui) {
             d->rol = 4;
             if (alCursor) alCursor(x, y);

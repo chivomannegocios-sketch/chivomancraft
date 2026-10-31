@@ -1124,7 +1124,7 @@ static void moverEje(int eje, double delta) {
 static std::string archivoJugador() { return g_dir + "/jugador.txt"; }
 static std::string archivoBarra() { return g_dir + "/barra.txt"; }
 static std::string g_nombreMundo = "MUNDO";
-static int g_material = PASTO;
+static int g_material = -1;
 static bool g_pincelBloque = false;
 static bool g_destruir = false;      // herramienta actual: destruir (en vez de poner un material)
 static bool g_menu = false;          // menu de materiales abierto (tecla E)
@@ -1284,6 +1284,9 @@ static int survDrop(int tp) {
     if (tp == TNT_ENC) return TNT;
     return tp;
 }
+static float g_romFrac = 0.0f;                 // progreso de picar el bloque que miras (0..1)
+static double g_romT = 0;
+static long long g_romKey = -1;
 static double survCooldown(int tp, int mat) {   // segundos entre cubitos picados
     int cl = survClase(tp);
     double dur = cl == 0 ? 0.8 : cl == 1 ? 1.4 : cl == 2 ? (survNivelNec(tp) >= 2 ? 3.0 : 2.2) : 1.0;
@@ -1450,10 +1453,10 @@ static void tntActualizar(double ahora) {
     }
 }
 static const int VACIO = -1;                                                                  // casilla vacia (mano libre: solo rompe)
-static int g_barra[9] = {0, PASTO, TIERRA, PIEDRA, ARENA, MADERA, HOJAS, CARBON, ANTORCHA};   // barra de 9 casillas
+static int g_barra[9] = {VACIO, VACIO, VACIO, VACIO, VACIO, VACIO, VACIO, VACIO, VACIO};   // barra de 9 casillas
 static int g_mano = -100, g_manoOrigen = -1;      // objeto agarrado en el menu (-100 = nada) y de que casilla de la barra vino (-1 = del menu)
 static double g_manoX = 0, g_manoY = 0;           // donde se pulso, para distinguir clic de arrastre
-static int g_sel = 1;                                                                        // casilla elegida
+static int g_sel = 0;                                                                        // casilla elegida
 static void aplicarSel() { g_material = g_barra[g_sel]; g_destruir = g_material == 0; }
 static std::string archivoBarra();
 static void guardarBarra() {
@@ -1464,7 +1467,7 @@ static void guardarBarra() {
 }
 static void cargarBarra() {
     FILE* f = std::fopen(archivoBarra().c_str(), "r");
-    if (!f) return;
+    if (!f) { aplicarSel(); return; }
     int v[9]; bool ok = true;
     for (int i = 0; i < 9 && ok; i++) ok = std::fscanf(f, "%d", &v[i]) == 1;
     std::fclose(f);
@@ -2390,6 +2393,18 @@ static int g_pantalla = 1;                 // 0 = lista de mundos, 1 = juego, 2 
 static bool g_argHost = false;
 static std::string g_argUnir, g_argNombre;
 static int g_argPuerto = RED_PUERTO;
+static std::string g_exe0;                 // ruta del ejecutable (para abrir la otra version SUB)
+static bool g_cambiarSub = false;          // el jugador pidio cambiar el tipo de mundo (SUB 1 <-> SUB 2): se abre el otro ejecutable
+static std::string otroExe() {             // ruta del ejecutable del otro tipo de mundo (SUB 2 <-> SUB 1)
+    namespace fs = std::filesystem;
+    fs::path d = fs::path(g_exe0).parent_path();
+#ifdef _WIN32
+    const char* ext = ".exe";
+#else
+    const char* ext = "";
+#endif
+    return (d / (std::string(SUB == 2 ? "juego_sub1" : "juego") + ext)).string();
+}
 static bool g_volverMenu = false;          // "guardar y salir": al cerrar la partida se reinicia el juego en el menu de inicio
 static std::string g_unirElegido, g_ipTexto, g_errorInicio;
 static bool g_conectando = false;
@@ -2561,7 +2576,9 @@ static MRect lanVolver(const MLBase& b, int fbh) { return {b.x0, fbh - 108 * b.k
 // pantalla 2: 0..3 botones.  pantalla 3: 10 volver, 11 unir por IP, 12+i servidor i
 static int inicioHit(double mx, double my) {
     double px = mx * g_fbW / std::max(1, g_winW), py = my * g_fbH / std::max(1, g_winH);
-    if (g_pantalla == 2) { for (int i = 0; i < 4; i++) if (mDentro(tituloRect(g_fbW, g_fbH, i), px, py)) return i; return -1; }
+    if (g_pantalla == 2) { 
+        const int nb = 5;
+        for (int i = 0; i < nb; i++) if (mDentro(tituloRect(g_fbW, g_fbH, i), px, py)) return i; return -1; }
     MLBase b = lanBase(g_fbW, g_fbH);
     if (mDentro(lanVolver(b, g_fbH), px, py)) return 10;
     if (mDentro(lanUnir(b, g_fbH), px, py)) return 11;
@@ -2574,6 +2591,18 @@ static void inicioAccion(GLFWwindow* w, int h) {
         else if (h == 1) { g_mundos = listarMundos(); g_scrollM = 0; g_confBorrar = -1; g_pantalla = 0; }
         else if (h == 2) { g_errorInicio.clear(); lanAbrir(); g_pantalla = 3; }
         else if (h == 3) glfwSetWindowShouldClose(w, 1);
+#ifdef ANDROID_GAME
+        else if (h == 4) {       // el APK trae las dos versiones: se guarda cual abrir y la app se relanza
+            FILE* f = std::fopen("sub.txt", "w");
+            if (f) { std::fprintf(f, "%d", SUB == 2 ? 1 : 2); std::fclose(f); g_cambiarSub = true; glfwSetWindowShouldClose(w, 1); }
+        }
+#else
+        else if (h == 4) {
+            std::error_code ec;
+            if (!std::filesystem::exists(otroExe(), ec)) g_errorInicio = std::string("FALTA ") + std::filesystem::path(otroExe()).filename().string() + ": USA COMPILAR_Y_JUGAR.BAT";
+            else { g_errorInicio.clear(); g_cambiarSub = true; glfwSetWindowShouldClose(w, 1); }
+        }
+#endif
     } else if (g_pantalla == 3) {
         if (h == 10) { lanCerrar(); g_pantalla = 2; }
         else if (h == 11 && !g_ipTexto.empty()) g_unirElegido = g_ipTexto;
@@ -2729,6 +2758,16 @@ static void tecladoDigito(int d) {
         if (g_baseDig >= 4) { g_tecladoOn = false; g_puertaT0 = glfwGetTime(); g_aviso = "CODIGO CORRECTO: LA PUERTA SE ABRE"; g_avisoT = glfwGetTime(); }
     } else { g_tecladoErr = glfwGetTime(); }
 }
+static bool* g_bloqIzqP = nullptr;
+static void qBotar() {      // v86: tecla Q = botar 1 objeto de la casilla elegida (creativo: vaciar la casilla)
+    if (g_menu || g_pausa || g_chat || g_pantalla != 1 || g_ck.activo) return;
+    const int id = g_material;
+    if (id < 0) { aviso("CASILLA VACIA"); return; }
+    if (!g_survival || g_inv[id] <= 0) { g_barra[g_sel] = VACIO; aplicarSel(); guardarBarra(); aviso("CASILLA VACIADA"); return; }
+    g_inv[id]--;
+    const double fx = std::sin(g_j.yaw), fz = -std::cos(g_j.yaw);
+    sueltoBotar(id, g_j.p.x + fx * 0.5, g_j.p.y + g_j.alto * 0.8, g_j.p.z + fz * 0.5, fx, fz, glfwGetTime());
+}
 static void alChar(GLFWwindow*, unsigned int cp) {
     if (g_pantalla == 3) { if (((cp >= '0' && cp <= '9') || cp == '.' || cp == ':') && g_ipTexto.size() < 24) g_ipTexto += (char)cp; return; }
     if (g_chat && cp >= 32 && cp < 127 && g_chatBuf.size() < 100) g_chatBuf += (char)cp;
@@ -2740,11 +2779,21 @@ static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
         else if (tecla == GLFW_KEY_ENTER || tecla == GLFW_KEY_KP_ENTER) {
             if (!g_chatBuf.empty()) {
                 std::string cm = g_chatBuf; for (auto& ch : cm) ch = (char)std::tolower((unsigned char)ch);
+                bool cmdNuevo = true;
+                if (cm == "/dia" || cm == "/noche" || cm == "/amanecer") {
+                    if (g_red.cli) aviso("EN PARTIDA AJENA SOLO EL ANFITRION CAMBIA LA HORA");
+                    else { g_hora = cm == "/dia" ? 0.25 : cm == "/noche" ? 0.62 : 0.0; aviso(cm == "/dia" ? "ES DE DIA" : cm == "/noche" ? "ES DE NOCHE" : "AMANECE"); }
+                }
+                else if (cm == "/creativo") { if (g_survival) survCambiarModo(); else aviso("YA ESTAS EN CREATIVO"); }
+                else if (cm == "/survival") { if (!g_survival) survCambiarModo(); else aviso("YA ESTAS EN SURVIVAL"); }
+                else if (cm == "/vaciar") { for (int i = 0; i < 9; i++) g_barra[i] = VACIO; aplicarSel(); guardarBarra(); aviso("BARRA VACIADA"); }
+                else if (cm == "/ayuda") aviso("/DIA /NOCHE /AMANECER /CREATIVO /SURVIVAL /VACIAR /COHETE /LUNA /BASE");
+                else cmdNuevo = false;
                 if (cm == "/cohete") { if (g_survival && g_inv[ID_KITCOH] <= 0) aviso("NECESITAS UN KIT COHETE (RECETAS)"); else { if (g_survival) g_inv[ID_KITCOH]--; g_pedirCohete = true; } }
                 if (cm == "/cohetemoderno" || cm == "/cohetebase") { if (g_ck.activo && !g_modoLuna) aviso("BAJA PRIMERO DE LA NAVE"); else if (g_survival && g_inv[ID_KITCOH] <= 0) aviso("NECESITAS UN KIT COHETE (RECETAS)"); else { if (g_survival) g_inv[ID_KITCOH]--; g_cohRepon = true; g_cohRepTp = false; if (!g_modoLuna) g_lunaPend = true; } }       // v71c: repone el cohete moderno de la base lunar
                 if (cm == "/luna") g_lunaPend = true;       // (prueba) ir directo al mundo de la Luna
                 if (cm == "/base") { if (g_modoLuna) irALaBase(0, 9, 1, 0, 0); else { g_irBase = true; g_lunaPend = true; } }   // (prueba) ir a la puerta de la base lunar
-                else if (cm[0] == '/') { g_aviso = "COMANDO DESCONOCIDO. COMANDOS: /COHETE"; g_avisoT = glfwGetTime(); }
+                else if (cm[0] == '/' && !cmdNuevo && cm != "/cohete" && cm != "/cohetemoderno" && cm != "/cohetebase" && cm != "/luna") { g_aviso = "COMANDO DESCONOCIDO. ESCRIBE /AYUDA"; g_avisoT = glfwGetTime(); }
                 else if (g_red.activo()) g_red.chatEnviar(g_chatBuf);
             }
             g_chatBuf.clear(); g_chat = false;
@@ -2823,7 +2872,8 @@ static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
     if (tecla == GLFW_KEY_F9) g_pedirCiudad = true;       // prueba de rendimiento: ciudad de luces
     if (tecla == GLFW_KEY_B || tecla == GLFW_KEY_LEFT_CONTROL) g_pincelBloque = !g_pincelBloque;
     if (tecla == GLFW_KEY_V) { g_vsync = !g_vsync; glfwSwapInterval(g_vsync ? 1 : 0); }
-    if (tecla == GLFW_KEY_X || tecla == GLFW_KEY_0) { g_barra[g_sel] = VACIO; aplicarSel(); }
+    if (tecla == GLFW_KEY_X || tecla == GLFW_KEY_0) { g_barra[g_sel] = VACIO; aplicarSel(); guardarBarra(); }
+    if (tecla == GLFW_KEY_Q) qBotar();
     if (tecla >= GLFW_KEY_1 && tecla <= GLFW_KEY_9) { g_sel = tecla - GLFW_KEY_1; aplicarSel(); }
 }
 static void alClic(GLFWwindow* w, int boton, int accion, int) {
@@ -3367,7 +3417,7 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
     if (!g_redInfo.empty()) { hTexto(g_redInfo.c_str(), x, y, t, 0.5f, 1.0f, 0.6f); y += lh; }
     if (g_red.activo() || g_chat) {
         double nc = glfwGetTime();
-        float cy0 = fbh - 96 * k - (g_chat ? 0.0f : 0.0f);
+        float cy0 = (g_chat && g_tac.activo) ? fbh * 0.40f : fbh - 96 * k;      // con teclado tactil el chat sube para que no lo tape
         int n = 0;
         for (auto it = g_chatLog.rbegin(); it != g_chatLog.rend() && n < 8; ++it) {
             double edad = nc - it->t;
@@ -3655,6 +3705,7 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
         float cx = fbw / 2.0f, cy = fbh / 2.0f, L = 9 * k, e = std::max(2.0f, 2 * k);
         hRect(cx - L, cy - e / 2, 2 * L, e, 1, 1, 1, 0.9f);
         hRect(cx - e / 2, cy - L, e, 2 * L, 1, 1, 1, 0.9f);
+        if (g_romFrac > 0.02f) { float bw = 60 * k; hRect(cx - bw / 2, cy + L + 8 * k, bw, 6 * k, 0, 0, 0, 0.6f); hRect(cx - bw / 2, cy + L + 8 * k, bw * std::min(1.0f, g_romFrac), 6 * k, 1.0f, 0.85f, 0.2f, 0.95f); }
     }
 #ifdef MOVIL
     tactilDibujar(fbw, fbh, t);
@@ -3746,6 +3797,8 @@ static void inicioDibujar(int fbw, int fbh) {
         hBoton(tituloRect(fbw, fbh, 1), k, 0.14f, 0.30f, 0.52f, hov == 1, "MIS MUNDOS", t * 1.6f);
         hBoton(tituloRect(fbw, fbh, 2), k, 0.38f, 0.24f, 0.55f, hov == 2, "MULTIJUGADOR", t * 1.6f);
         hBoton(tituloRect(fbw, fbh, 3), k, 0.45f, 0.14f, 0.14f, hov == 3, "SALIR", t * 1.6f);
+        hBoton(tituloRect(fbw, fbh, 4), k, 0.30f, 0.30f, 0.12f, hov == 4, SUB == 2 ? "MUNDO SUB 2 NORMAL (CAMBIAR)" : "MUNDO SUB 1 AMPLIO (CAMBIAR)", t * 0.95f);
+        if (!g_errorInicio.empty()) { MRect r4 = tituloRect(fbw, fbh, 4); hTexto(g_errorInicio.c_str(), r4.x, r4.y + r4.h + 8 * k, t, 1.0f, 0.5f, 0.45f); }
         return;
     }
     fondoInicio(fbw, fbh, k, t, "MULTIJUGADOR - PARTIDAS EN TU WIFI");
@@ -3795,6 +3848,13 @@ static void suenoDibujar(int fbw, int fbh, double ahora) {
     float a = t < 0.8 ? (float)(t / 0.8) : (t < 2.0 ? 1.0f : (float)(1.0 - (t - 2.0) / 0.8));
     a = std::max(0.0f, std::min(1.0f, a));
     hRect(0, 0, (float)fbw, (float)fbh, 0.01f, 0.01f, 0.03f, a);
+}
+static void fuegoDibujar(int fbw, int fbh, double ahora) {
+    if (g_ardeHasta > ahora) { const float f = 0.09f + 0.04f * std::sin((float)ahora * 18.0f); hRect(0, 0, (float)fbw, (float)fbh, 1.0f, 0.35f, 0.0f, f); const char* q = "TE QUEMAS - BUSCA AGUA"; hTexto(q, (fbw - hAncho(q, 3)) / 2.0f, fbh * 0.2f, 3, 1.0f, 0.7f, 0.2f); }
+    if (g_suenoT0 < 0) return;
+    const double t = ahora - g_suenoT0;
+    float a = t < 0.8 ? (float)(t / 0.8) : (t < 2.0 ? 1.0f : (float)(1.0 - (t - 2.0) / 0.8));
+    a = std::max(0.0f, std::min(1.0f, a));
     if (a > 0.6f) { const char* z = g_suenoHecho ? "BUENOS DIAS" : "ZZZ..."; float px = std::max(3.0f, fbh / 120.0f); hTexto(z, (fbw - hAncho(z, px)) / 2.0f, fbh * 0.45f, px, 0.9f, 0.9f, 1.0f); }
 }
 
@@ -4237,7 +4297,7 @@ static int juego_main() {
     if (g_pantalla != 1) {
         g_mundos = listarMundos();
         auto frameInicio = [&]() {
-            g_tac.ui = true; g_tac.uiJuego = false;
+            g_tac.ui = true; g_tac.uiJuego = false; g_tac.chat = false; g_tac.texto = g_pantalla == 3;
             glfwPollEvents();
             int fbw, fbh;
             glfwGetFramebufferSize(ventana, &fbw, &fbh);
@@ -4256,7 +4316,7 @@ static int juego_main() {
         };
         for (;;) {
             while (!glfwWindowShouldClose(ventana) && g_mundoElegido < 0 && !g_crearNuevo && g_unirElegido.empty()) frameInicio();
-            if (glfwWindowShouldClose(ventana)) { lanCerrar(); glfwTerminate(); return 0; }
+            if (glfwWindowShouldClose(ventana)) { lanCerrar(); glfwTerminate(); return g_cambiarSub ? 3 : 0; }
             if (!g_unirElegido.empty()) {
                 g_conectando = true; g_errorInicio.clear();
                 frameInicio(); frameInicio();
@@ -4358,6 +4418,7 @@ static int juego_main() {
         g_tac.pil = (g_veh.activo && g_veh.pilotando) || g_ck.activo;
         g_tac.extra = g_material == ID_SPRAY || g_material == RUEDA;
         g_tac.volando = g_j.volar;
+        g_tac.chat = g_chat; g_tac.texto = g_chat;
         glfwPollEvents();
 #ifdef ANDROID_GAME
         if (A_pausado) { A_pausado = false; g_guardarYa = true; }      // al pasar a segundo plano se guarda
@@ -4615,6 +4676,9 @@ static int juego_main() {
         if (!cargando) jefeTick(dt, ahora);
         if (!cargando) ovejasTick(dt, ahora, g_j.p.x, g_j.p.y, g_j.p.z, !g_modoLuna && !g_ck.activo && g_pantalla == 1);
         suenoTick(ahora);
+        { std::vector<int> cog; sueltosTick(dt, g_j.p.x, g_j.p.y, g_j.p.z, ahora, cog);
+          for (int id : cog) if (id >= 0 && id < 256) g_inv[id] = std::min(9999, g_inv[id] + 1); }
+        neansTick(dt, ahora, g_j.p.x, g_j.p.y, g_j.p.z, !g_modoLuna && !g_ck.activo && !cargando && g_pantalla == 1, esDeNoche());
         // ---- camara
         V3 mira = {std::cos(g_j.pitch) * std::sin(g_j.yaw), std::sin(g_j.pitch), -std::cos(g_j.pitch) * std::cos(g_j.yaw)};
         V3 cam = {g_j.p.x, g_j.p.y + g_j.ojo, g_j.p.z};
@@ -4672,15 +4736,28 @@ static int juego_main() {
         if (g_pedirG) { g_pedirG = false; if (g_ck.activo) {} else if (pilV) vehSubirBajar(); else if (g_veh.activo) vehSubirBajar(); else if (golpe.hay) vehEnsamblar(golpe.x, golpe.y, golpe.z); else aviso("MIRA UNA PIEZA DEL VEHICULO Y PULSA G"); if (g_veh.activo) g_guardarYa = true; }
         if (g_pedirH) { g_pedirH = false; if (g_veh.activo && !g_veh.pilotando) { vehDesarmar(); g_guardarYa = true; } }
         double cdAcc = 0.18;
-        if (g_survival && izq && golpe.hay) cdAcc = survCooldown(leerCubito(golpe.x, golpe.y, golpe.z), g_material);
+        bool romListo = true;       // v86: en survival picar lleva tiempo segun el bloque y la herramienta (cubito = 1/4 del tiempo de un bloque)
+        if (g_survival && izq && golpe.hay && !g_menu) {
+            const int kx = g_pincelBloque ? divPiso(golpe.x, SUB) : golpe.x, ky = g_pincelBloque ? divPiso(golpe.y, SUB) : golpe.y, kz = g_pincelBloque ? divPiso(golpe.z, SUB) : golpe.z;
+            const long long key = ((long long)kx * 73856093LL) ^ ((long long)ky * 19349663LL) ^ ((long long)kz * 83492791LL) ^ (g_pincelBloque ? 1LL : 0LL);
+            if (key != g_romKey) { g_romKey = key; g_romT = 0; }
+            g_romT += dt;
+            const double tNec = survCooldown(leerCubito(golpe.x, golpe.y, golpe.z), g_material) / 0.18 * 1.2 * ((g_pincelBloque || SUB == 1) ? 1.0 : 0.25);   // en SUB 1 un cubito ya ES un bloque completo
+            romListo = g_romT >= tNec;
+            g_romFrac = (float)std::min(1.0, g_romT / std::max(0.05, tNec));
+            cdAcc = 0;
+        } else { g_romT = 0; g_romKey = -1; g_romFrac = 0.0f; }
         static double tMelee = -10;
         {   // v84: golpear ovejas con el clic izquierdo (no rompe el bloque de atras)
             static double tOv = -10;
             if (izq && !g_menu && !g_modoLuna && g_material != ID_ARCO && !g_ck.activo) {
                 const ArmaInfo ai0 = armaInfo(g_material);
                 const double alc = esArma(g_material) ? std::max(4.5, ai0.alcance) : 4.5;
-                double dOv = 0; const int oi = ovejaApuntada(cam, norm(mira), alc, &dOv);
-                if (oi >= 0) {
+                double dOv = 0; int oi = ovejaApuntada(cam, norm(mira), alc, &dOv);
+                double dNe = 0; const int ni = neanApuntado(cam, norm(mira), alc, &dNe);
+                const bool usaNe = ni >= 0 && (oi < 0 || dNe < dOv);
+                if (usaNe) dOv = dNe;
+                if (oi >= 0 || usaNe) {
                     double dBl = 1e9;
                     if (golpe.hay) { const double cx_ = (golpe.x + 0.5) / SUB - cam.x, cy_ = (golpe.y + 0.5) / SUB - cam.y, cz_ = (golpe.z + 0.5) / SUB - cam.z; dBl = std::sqrt(cx_ * cx_ + cy_ * cy_ + cz_ * cz_) - 0.4; }
                     if (dOv < dBl) {
@@ -4690,6 +4767,13 @@ static int juego_main() {
                             tOv = ahora;
                             const double dano = esArma(g_material) && !((g_material == ID_ESPADAP || g_material == ID_MARTILLO) && g_survival && g_inv[0] == 0) ? ai0.dano : (esHerr(g_material) ? 4.0 : 2.0);
                             int lana = 0, carne = 0;
+                            if (usaNe) {
+                                int madera = 0;
+                                if (neanGolpear(ni, dano, g_j.p.x, g_j.p.z, ahora, &carne, &madera)) {
+                                    g_inv[MADERA] = std::min(9999, g_inv[MADERA] + madera); g_inv[ID_CARNE] = std::min(9999, g_inv[ID_CARNE] + carne);
+                                    char mm[64]; std::snprintf(mm, sizeof mm, "NEANDERTAL DERROTADO: +%d CARNE  +%d MADERA", carne, madera); aviso(mm);
+                                }
+                            } else
                             if (ovejaGolpear(oi, dano, g_j.p.x, g_j.p.z, ahora, &lana, &carne)) {
                                 g_inv[ID_LANA] = std::min(9999, g_inv[ID_LANA] + lana); g_inv[ID_CARNE] = std::min(9999, g_inv[ID_CARNE] + carne);
                                 char mm[64]; std::snprintf(mm, sizeof mm, "+%d LANA  +%d CARNE", lana, carne); aviso(mm);
@@ -4699,6 +4783,7 @@ static int juego_main() {
                 }
             }
         }
+        { static bool bloqIzq = false; if (!izq) bloqIzq = false; if (bloqIzq) izq = false; g_bloqIzqP = &bloqIzq; }
         const int camaT = (!g_menu && !g_modoLuna && !g_ck.activo) ? camaApuntada(cam, norm(mira), 5.0) : -1;
         if (camaT >= 0 && der && ahora - tAccion > 0.6) {            // clic derecho en la cama: dormir
             tAccion = ahora;
@@ -4709,11 +4794,14 @@ static int juego_main() {
                 g_spawnS[0] = g_camas[camaT].x; g_spawnS[1] = g_camas[camaT].y + 0.3; g_spawnS[2] = g_camas[camaT].z; g_spawnOk = true;   // reapareces en tu cama
             }
         } else
-        if (camaT >= 0 && izq && ahora - tAccion > 0.5) {            // clic izquierdo: recoger la cama
+        if (camaT >= 0 && izq) {            // clic izquierdo: recoger la cama (un solo toque; no sigue picando lo de atras)
+          if (ahora - tAccion > 0.3) {
+            *g_bloqIzqP = true;
             tAccion = ahora;
             g_camas.erase(g_camas.begin() + camaT); camasGuardar();
             if (g_survival) g_inv[ID_CAMA] = std::min(9999, g_inv[ID_CAMA] + 1);
             aviso("CAMA RECOGIDA");
+          }
         } else
         if (der && g_material == ID_CAMA && !g_menu && !g_modoLuna && golpe.hay && ahora - tAccion > 0.5 && (!g_survival || g_inv[ID_CAMA] > 0)) {   // poner la cama
             tAccion = ahora;
@@ -4778,8 +4866,8 @@ static int juego_main() {
             tAccion = ahora;                      // antorcha + clic sobre TNT = encender (no rompe ni pone nada)
             tntEncender(golpe.x, golpe.y, golpe.z, ahora, 3.0);
         } else
-        if (golpe.hay && (izq || der) && !(der && !izq && (g_material < 0 || esHerr(g_material))) && ahora - tAccion > cdAcc) {
-            tAccion = ahora;
+        if (golpe.hay && (izq || der) && !(der && !izq && (g_material < 0 || esHerr(g_material))) && ahora - tAccion > cdAcc && !(g_survival && izq && !romListo)) {
+            tAccion = ahora; g_romT = 0; g_romFrac = 0.0f;
             std::vector<ChunkP> sucios;
             auto celda = [&](int x, int y, int z, int& x0, int& y0, int& z0, int& n) {
                 if (g_pincelBloque) { x0 = divPiso(x, SUB) * SUB; y0 = divPiso(y, SUB) * SUB; z0 = divPiso(z, SUB) * SUB; n = SUB; }
@@ -4866,6 +4954,13 @@ static int juego_main() {
             if (std::atoi(std::getenv("PRUEBA_OVEJA")) == 3) { Oveja o; o.x = g_j.p.x + fx * 2.5; o.z = g_j.p.z + fz * 2.5; o.y = alturaTerreno(o.x, o.z) + 0.3; o.yaw = g_j.yaw + 3.14; o.tSig = 1e9; g_ovejas.push_back(o); }
             else { double bx = g_j.p.x + fx * 2.5, bz = g_j.p.z + fz * 2.5; g_camas.push_back({std::floor(bx) + 0.5, alturaTerreno(bx, bz), std::floor(bz) + 0.5, 1}); }
         } else
+        if (const char* pn = std::getenv("PRUEBA_NEAN")) if (frame == 200) {   // (pruebas) 3 neandertales delante: PRUEBA_NEAN=<distancia>
+            const double fx = std::sin(g_j.yaw), fz = -std::cos(g_j.yaw), rx = -fz, rz = fx, d = std::atof(pn);
+            for (int i = 0; i < 3; i++) {
+                Nean n; n.x = g_j.p.x + fx * d + rx * (i - 1) * 2.0; n.z = g_j.p.z + fz * d + rz * (i - 1) * 2.0;
+                n.y = alturaTerreno(n.x, n.z) + 0.3; n.yaw = g_j.yaw + 3.14159; n.tipo = i; n.tSig = 1e9; n.tProxAtk = std::getenv("NEAN_ATACA") ? 0.0 : 1e9; if (std::getenv("NEAN_TIPO")) n.tipo = std::atoi(std::getenv("NEAN_TIPO")); g_neans.push_back(n);
+            }
+        }
         if (std::getenv("PRUEBA_OVEJA") && frame == 200) {   // (pruebas) dos ovejas y una cama delante
             const double fx = std::sin(g_j.yaw), fz = -std::cos(g_j.yaw), rx = -fz, rz = fx;
             for (int i = 0; i < 2; i++) {
@@ -5787,6 +5882,7 @@ static int juego_main() {
             g_hud.clear();
             hdibujar(fbw, fbh, fps, cargando, ahora - tMensaje < 3.0, g_j.p.x, g_j.p.y, g_j.p.z);
             suenoDibujar(fbw, fbh, ahora);
+            fuegoDibujar(fbw, fbh, ahora);
             if (g_pausa) pausaDibujar(fbw, fbh);
             subirHud(fbw, fbh);
         }
@@ -5816,32 +5912,53 @@ static int juego_main() {
 
 // "guardar y salir": se vuelve a abrir el juego (sin argumentos) y arranca en el menu de inicio
 #ifndef ANDROID_GAME
-static void reiniciarEnMenu(const char* exe) {
+static void reiniciarEnMenu(const char* exe, bool otro = false) {
     std::fflush(stdout);
+    const std::string dest = otro ? otroExe() : std::string(exe);
 #ifdef _WIN32
     _putenv("MUNDO="); _putenv("RED_UNIR="); _putenv("RED_HOST=");
-    _execl(exe, exe, (char*)nullptr);
+    _execl(dest.c_str(), dest.c_str(), (char*)nullptr);
 #else
     unsetenv("MUNDO"); unsetenv("RED_UNIR"); unsetenv("RED_HOST");
-    execl("/proc/self/exe", exe, (char*)nullptr);
+    if (otro) execl(dest.c_str(), dest.c_str(), (char*)nullptr);
+    else execl("/proc/self/exe", exe, (char*)nullptr);
 #endif
 }
 #endif
 
 #ifdef ANDROID_GAME
-void android_main(struct android_app* app) {       // punto de entrada en Android (NativeActivity)
+static void androidCorrer(struct android_app* app) {
     A_app = app;
     if (app->activity && app->activity->internalDataPath) { if (chdir(app->activity->internalDataPath) != 0) A_log("chdir fallo"); }   // aqui se guardan mundos y opciones
     int r = juego_main();
-    if (r == 2) A_relanzar();       // "guardar y salir": se vuelve a abrir la app en el menu de inicio
+    if (r == 2 || r == 3) A_relanzar();       // "guardar y salir" / cambiar de SUB: se vuelve a abrir la app en el menu de inicio
     ANativeActivity_finish(app->activity);
-    if (r == 2) { usleep(500000); _exit(0); }   // el proceso nuevo arranca con todo limpio
+    if (r == 2 || r == 3) { usleep(500000); _exit(0); }   // el proceso nuevo arranca con todo limpio
+}
+// el APK trae DOS librerias: libjuego.so (SUB 2) y libjuego_sub1.so (SUB 1). Android siempre abre libjuego.so, que lee sub.txt y,
+// si toca SUB 1, entrega el control a libjuego_sub1.so (misma ventana, otro mundo).
+extern "C" __attribute__((visibility("default"))) void juego_android_main(struct android_app* app) { androidCorrer(app); }
+void android_main(struct android_app* app) {       // punto de entrada en Android (NativeActivity)
+#if SUB_VAL == 2
+    if (app->activity && app->activity->internalDataPath) { if (chdir(app->activity->internalDataPath) != 0) A_log("chdir fallo"); }
+    int sub = 2;
+    if (FILE* f = std::fopen("sub.txt", "r")) { if (std::fscanf(f, "%d", &sub) != 1) sub = 2; std::fclose(f); }
+    if (sub == 1) {
+        void* h = dlopen("libjuego_sub1.so", RTLD_NOW | RTLD_LOCAL);
+        void (*fn)(struct android_app*) = h ? (void (*)(struct android_app*))dlsym(h, "juego_android_main") : nullptr;
+        if (fn) { fn(app); return; }
+        A_log("no pude abrir libjuego_sub1.so: se abre SUB 2");
+    }
+#endif
+    androidCorrer(app);
 }
 #else
 int main(int argc, char** argv) {
     leerArgs(argc, argv);
+    g_exe0 = argv[0];
     int r = juego_main();
     if (r == 2) reiniciarEnMenu(argv[0]);
+    if (r == 3) { reiniciarEnMenu(argv[0], true); return 0; }
     return r == 2 ? 0 : r;
 }
 #endif

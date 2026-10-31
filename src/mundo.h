@@ -19,9 +19,11 @@
 #endif
 constexpr int    SUB = SUB_VAL;                 // cubitos por lado de un bloque (1, 2, 4 u 8)
 constexpr int    CS = 32;                 // cubitos por lado de un chunk
-constexpr double VS = 1.0 / SUB;          // tamano de un cubito en bloques
+constexpr double VS = 1.0 / SUB;
+constexpr double KS = (SUB == 1) ? 0.5 : 1.0;      // v86: con SUB 1 el relieve y los biomas son el doble de anchos
+constexpr double TS = (SUB == 1) ? 1.6 : 1.0;      // v86: con SUB 1 los arboles son mas grandes (mas altos y de copa ancha)          // tamano de un cubito en bloques
 constexpr int    OFFY = 105;              // bloques de profundidad bajo el relieve original (el terreno se sube OFFY bloques)
-constexpr int    WORLD_H_BLOCKS = 96 + OFFY;     // altura del mundo en bloques
+constexpr int    WORLD_H_BLOCKS = (SUB == 1) ? 400 : (96 + OFFY);     // altura del mundo en bloques (v86: SUB 1 llega a 400)
 constexpr int    HYC = (WORLD_H_BLOCKS * SUB + CS - 1) / CS;   // chunks en vertical
 constexpr int    WATER_LEVEL = 22 + OFFY;        // nivel del agua (en bloques)
 constexpr double LAGO_UMBRAL = 0.40;      // mas alto = mas lagunas
@@ -142,9 +144,10 @@ constexpr int BIO_PLANO = BIO_PLAYA;       // los primeros BIO_PLANO biomas sale
 static inline float acota01(float v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
 // continentalidad: ruido muy grande; por debajo de CO_UMBRAL es oceano, justo encima es playa
 constexpr float CO_UMBRAL = 0.345f;
-static inline float continental(double bx, double bz) { return fbm((float)bx * 0.0011f, (float)bz * 0.0011f, 3, 97) - CO_UMBRAL; }
-static inline float temp01(double bx, double bz) { return acota01((fbm((float)bx * 0.0022f, (float)bz * 0.0022f, 2, 61) - 0.24f) / 0.52f); }   // 0 = polar, 1 = tropical
-static int biomaPesos(double bx, double bz, float* w) {      // devuelve el bioma dominante
+static inline float continental(double bx, double bz) { bx *= KS; bz *= KS; return fbm((float)bx * 0.0011f, (float)bz * 0.0011f, 3, 97) - CO_UMBRAL; }
+static inline float temp01(double bx, double bz) { bx *= KS; bz *= KS; return acota01((fbm((float)bx * 0.0022f, (float)bz * 0.0022f, 2, 61) - 0.24f) / 0.52f); }   // 0 = polar, 1 = tropical
+static int biomaPesos(double bx0, double bz0, float* w) {      // devuelve el bioma dominante
+    const double bx = bx0 * KS, bz = bz0 * KS;
     float T = fbm((float)bx * 0.0022f, (float)bz * 0.0022f, 2, 61);
     float Hm = fbm((float)bx * 0.0026f + 500.0f, (float)bz * 0.0026f, 2, 71);
     float t = acota01((T - 0.24f) / 0.52f), h = acota01((Hm - 0.24f) / 0.52f);
@@ -159,7 +162,7 @@ static int biomaPesos(double bx, double bz, float* w) {      // devuelve el biom
     }
     for (int b = 0; b < BIO_PLANO; b++) w[b] /= tot;
     // costa: oceano (cc < 0) y playa (0 <= cc < 0.05) tapan a los demas biomas
-    float cc = continental(bx, bz);
+    float cc = continental(bx0, bz0);
     w[BIO_PLAYA] = 0; w[BIO_OCEANO] = 0;
     if (cc < 0.03f) {
         float wc = cc < 0 ? 1.0f : 1.0f - (float)suave(0.018, 0.03, cc);
@@ -226,7 +229,9 @@ static double alturaTerreno(double bx, double bz) { return terrenoBase(bx, bz, n
 static double terrenoBase(double bx, double bz, int* domOut) {
     if (g_modoLuna) { if (domOut) *domOut = 0; return alturaLuna(bx, bz); }
     const double WL0 = WATER_LEVEL - OFFY;
-    float w[BIO_N]; int dom = biomaPesos(bx, bz, w);
+    const double bxr = bx, bzr = bz;
+    float w[BIO_N]; int dom = biomaPesos(bxr, bzr, w);
+    bx *= KS; bz *= KS;
     if (domOut) *domOut = dom;
     float base = fbm((float)bx * 0.004f, (float)bz * 0.004f, 3, 1);
     float colinas = fbm((float)bx * 0.02f, (float)bz * 0.02f, 4, 2);
@@ -279,7 +284,7 @@ static double terrenoBase(double bx, double bz, int* domOut) {
     }
 
     {   // costa: playa suave y oceano (poco profundo cerca de la orilla, algo mas hondo mar adentro) con islas
-        double cc = continental(bx, bz);
+        double cc = continental(bxr, bzr);
         if (cc < 0.05) {
             float fino = fbm((float)bx * 0.03f, (float)bz * 0.03f, 3, 85);
             double hcosta;
@@ -291,7 +296,7 @@ static double terrenoBase(double bx, double bz, int* domOut) {
                 hcosta = WL0 + 1.4 - prof + (fino - 0.5) * 2.0 * suave(0.02, 0.07, u);
                 double isl = suave(0.60, 0.68, fbm((float)bx * 0.010f, (float)bz * 0.010f, 3, 99)) * suave(0.03, 0.07, u);
                 hcosta = hcosta * (1.0 - isl) + (WL0 + 2.6 + 5.0 * fino) * isl;
-                double fria = 1.0 - suave(0.10, 0.20, temp01(bx, bz));      // mar polar: icebergs
+                double fria = 1.0 - suave(0.10, 0.20, temp01(bxr, bzr));      // mar polar: icebergs
                 if (fria > 0.0) {
                     double ib = suave(0.62, 0.72, fbm((float)bx * 0.020f, (float)bz * 0.020f, 3, 49)) * suave(0.02, 0.06, u) * fria;
                     if (ib > 0.0) hcosta = std::max(hcosta, hcosta * (1.0 - ib) + (WL0 + 1.0 + 15.0 * fbm((float)bx * 0.06f, (float)bz * 0.06f, 3, 50)) * ib);
@@ -608,7 +613,7 @@ static DatosChunk generarChunk(int cx, int cy, int cz) {
             const int bx = divPiso(ox + lx, SUB), bz = divPiso(oz + lz, SUB);
             for (const Arb& a : arbs) {
                 const int tx = a.tx, tz = a.tz, kv = a.kv;
-                const int R = kv == 8 ? 5 : kv == 10 ? 2 : 3;
+                const int R = kv == 8 ? 5 : kv == 10 ? 2 : (int)std::ceil(3 * TS);
                 if (bx < tx - R || bx > tx + R || bz < tz - R || bz > tz + R) continue;
                 const double ha = a.ha;
                 const int vb = (int)std::floor(ha * SUB) + 1 - 2;      // base del tronco (cubitos)
@@ -658,27 +663,29 @@ static DatosChunk generarChunk(int cx, int cy, int cz) {
                 }
                 static const uint8_t HT[10] = {HOJAS, HOJA_ROJA, HOJA_NARANJA, HOJA_AMARILLA, HOJA_ROSA, HOJA_PINO, HOJAS, HOJAS, HOJAS, HOJA_PINO};
                 const uint8_t hoja = HT[kv];
-                const int bTronco = (kv == 5 || kv == 9) ? 7 : kv == 6 ? 5 : 6;
+                const int bTronco0 = (kv == 5 || kv == 9) ? 7 : kv == 6 ? 5 : 6;
+                const int bTronco = (int)std::lround(bTronco0 * TS);
                 if (tx == bx && tz == bz) {
                     for (int ly = 0; ly < CS; ly++) {
                         int vy = oy + ly;
                         if (vy >= vb && vy < vb + bTronco * SUB) dt[IDX(lx, ly, lz)] = MADERA;
                     }
                 }
-                if (dxz > 7.5) continue;
+                if (dxz > 7.5 * TS * TS) continue;
                 for (int ly = 0; ly < CS; ly++) {
                     int vy = oy + ly;
-                    double yb = (vy + 0.5) * VS - vb * VS;      // altura sobre la base del tronco, en bloques
+                    double yb = ((vy + 0.5) * VS - vb * VS) / TS;      // altura sobre la base del tronco, en bloques (sin escala)
+                    const double dxs = dxz / (TS * TS);
                     bool leaf; uint8_t hj = hoja;
                     if (kv == 5 || kv == 9) {            // pino: cono (el de la taiga lleva nieve encima en franjas)
                         double rr = 2.4 * (9.6 - yb) / 7.6 + 0.2;
-                        leaf = yb >= 2.0 && yb <= 9.6 && dxz <= rr * rr;
-                        if (leaf && kv == 9 && (yb > 8.4 || (((vy % 4) + 4) % 4 < 2 && dxz > (rr - 1.15) * (rr - 1.15)))) hj = HOJA_NIEVE;
+                        leaf = yb >= 2.0 && yb <= 9.6 && dxs <= rr * rr;
+                        if (leaf && kv == 9 && (yb > 8.4 || (((vy % 4) + 4) % 4 < 2 && dxs > (rr - 1.15) * (rr - 1.15)))) hj = HOJA_NIEVE;
                     } else if (kv == 6) {     // acacia: sombrilla plana y ancha
-                        leaf = (yb >= 4.4 && yb < 5.3 && dxz <= 7.2) || (yb >= 5.3 && yb < 6.2 && dxz <= 3.4);
+                        leaf = (yb >= 4.4 && yb < 5.3 && dxs <= 7.2) || (yb >= 5.3 && yb < 6.2 && dxs <= 3.4);
                     } else {                  // redonda (roble, otono, cerezo)
-                        double dy = yb - (bTronco - 1.0);
-                        leaf = dxz + dy * dy * 1.6 <= 7.2;
+                        double dy = yb - (bTronco0 - 1.0);
+                        leaf = dxs + dy * dy * 1.6 <= 7.2;
                     }
                     if (leaf && dt[IDX(lx, ly, lz)] == AIRE) dt[IDX(lx, ly, lz)] = hj;
                 }

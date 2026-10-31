@@ -135,6 +135,46 @@ static void A_cmd(android_app*, int32_t cmd) {
         default: break;
     }
 }
+// letra que produce una tecla (JNI: KeyEvent.getUnicodeChar); si falla, solo letras/numeros basicos
+static unsigned A_unicode(int kc, int meta) {
+    unsigned u = 0;
+    if (A_app && A_app->activity && A_app->activity->vm) {
+        JavaVM* vm = A_app->activity->vm; JNIEnv* env = nullptr;
+        bool ad = vm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_EDETACHED;
+        if (ad) vm->AttachCurrentThread(&env, nullptr);
+        if (env) {
+            jclass ck = env->FindClass("android/view/KeyEvent");
+            if (ck) {
+                jmethodID ctor = env->GetMethodID(ck, "<init>", "(II)V");
+                jmethodID gu = env->GetMethodID(ck, "getUnicodeChar", "(I)I");
+                if (ctor && gu) {
+                    jobject ev = env->NewObject(ck, ctor, 0, kc);
+                    if (ev) { u = (unsigned)env->CallIntMethod(ev, gu, meta); env->DeleteLocalRef(ev); }
+                }
+                env->DeleteLocalRef(ck);
+            }
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+        if (ad) vm->DetachCurrentThread();
+    }
+    if (!u) {
+        const bool sh = (meta & 1) != 0;
+        if (kc >= AKEYCODE_A && kc <= AKEYCODE_Z) u = (sh ? 'A' : 'a') + (kc - AKEYCODE_A);
+        else if (kc >= AKEYCODE_0 && kc <= AKEYCODE_9) u = '0' + (kc - AKEYCODE_0);
+        else if (kc == AKEYCODE_SPACE) u = ' ';
+        else if (kc == AKEYCODE_PERIOD) u = '.';
+        else if (kc == AKEYCODE_SLASH) u = '/';
+    }
+    return u;
+}
+// muestra / oculta el teclado del sistema segun lo que pida el juego (g_tac.texto) o el boton TECLADO
+static void A_tecladoTick() {
+    static bool visto = false;
+    if (!A_app || !A_app->activity) return;
+    if (g_tac.texto && (!visto || g_tac.pedirKb)) { ANativeActivity_showSoftInput(A_app->activity, ANATIVEACTIVITY_SHOW_SOFT_INPUT_FORCED); visto = true; }
+    else if (!g_tac.texto && visto) { ANativeActivity_hideSoftInput(A_app->activity, 0); visto = false; }
+    g_tac.pedirKb = false;
+}
 static int32_t A_input(android_app*, AInputEvent* e) {
     int tipo = AInputEvent_getType(e);
     if (tipo == AINPUT_EVENT_TYPE_MOTION) {
@@ -164,7 +204,16 @@ static int32_t A_input(android_app*, AInputEvent* e) {
         return 1;
     }
     if (tipo == AINPUT_EVENT_TYPE_KEY) {
-        if (AKeyEvent_getKeyCode(e) == AKEYCODE_BACK) {      // boton "atras" = Esc
+        const int kc = AKeyEvent_getKeyCode(e);
+        if (g_tac.texto && kc != AKEYCODE_BACK) {      // teclado del telefono: letras, numeros, borrar, enter
+            if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_UP) return 1;
+            if (kc == AKEYCODE_DEL) { if (g_tac.alTecla) g_tac.alTecla(259); return 1; }
+            if (kc == AKEYCODE_ENTER || kc == AKEYCODE_NUMPAD_ENTER) { if (g_tac.alTecla) g_tac.alTecla(257); return 1; }
+            unsigned u = A_unicode(kc, AKeyEvent_getMetaState(e));
+            if (u && g_tac.alChar) g_tac.alChar(u);
+            return 1;
+        }
+        if (kc == AKEYCODE_BACK) {      // boton "atras" = Esc
             if (AKeyEvent_getAction(e) == AKEY_EVENT_ACTION_DOWN && g_tac.alTecla) g_tac.alTecla(TK_ESC);
             return 1;
         }
@@ -197,6 +246,7 @@ static int glfwInit() {
 }
 static void glfwWindowHint(int, int) {}
 static void glfwPollEvents() {
+    A_tecladoTick();
     for (;;) {
         int fd = 0, ev = 0; void* dato = nullptr;
         int timeout = (A_surf == EGL_NO_SURFACE && !A_cerrar) ? -1 : 0;      // sin ventana (segundo plano) se espera sin gastar bateria
@@ -230,7 +280,7 @@ static GLFWglproc glfwGetProcAddress(const char* nombre) {
 static void glfwSetCursorPosCallback(GLFWwindow* w, FMouse f) { g_tac.alCursor = [f, w](double x, double y) { f(w, x, y); }; }
 static void glfwSetScrollCallback(GLFWwindow* w, FScroll f) { g_tac.alScroll = [f, w](double dy) { f(w, 0.0, dy); }; }
 typedef void (*FChar)(GLFWwindow*, unsigned int);
-static void glfwSetCharCallback(GLFWwindow*, FChar) {}
+static void glfwSetCharCallback(GLFWwindow* w, FChar f) { g_tac.alChar = [f, w](unsigned c) { f(w, c); }; }
 static void glfwSetKeyCallback(GLFWwindow* w, FKey f) { g_tac.alTecla = [f, w](int k) { f(w, k, 0, GLFW_PRESS, 0); }; }
 static void glfwSetMouseButtonCallback(GLFWwindow* w, FBtn f) { g_tac.alBoton = [f, w](int b, int a) { f(w, b, a, 0); }; }
 static void glfwSetInputMode(GLFWwindow*, int, int) {}

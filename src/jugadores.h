@@ -328,7 +328,7 @@ static void jugDibujarMano(const float* vp, double cx, double cy, double cz, dou
     m.syaw = (float)yaw - 0.30f;
     float fx = std::sin(m.syaw), fz = -std::cos(m.syaw);
     float Xx = fz, Xz = -fx;
-    float want[3] = {R[0] * 0.36f - Up[0] * 0.02f + F[0] * 0.42f, R[1] * 0.36f - Up[1] * 0.02f + F[1] * 0.42f, R[2] * 0.36f - Up[2] * 0.02f + F[2] * 0.42f};
+    float want[3] = {R[0] * 0.40f - Up[0] * 0.26f + F[0] * 0.40f, R[1] * 0.40f - Up[1] * 0.26f + F[1] * 0.40f, R[2] * 0.40f - Up[2] * 0.26f + F[2] * 0.40f};
     // el hombro del modelo esta en (-6, 24, 0): se coloca el modelo para que caiga en 'want'
     m.sx = (float)cx + want[0] - Xx * (-6.0f) * S; m.sy = (float)cy + want[1] - 24.0f * S; m.sz = (float)cz + want[2] - Xz * (-6.0f) * S;
     glClear(GL_DEPTH_BUFFER_BIT);

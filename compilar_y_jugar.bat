@@ -31,6 +31,8 @@ cmake -S . -B build -G "%GEN%" -A x64
 if errorlevel 1 goto error
 cmake --build build --config Release --target juego
 if errorlevel 1 goto error
+cmake --build build --config Release --target juego_sub1
+if errorlevel 1 goto error
 echo.
 echo Listo. Abriendo el juego...
 call build\Release\juego.exe

@@ -29,13 +29,23 @@ if(WIN32)
   target_link_libraries(juego PRIVATE ws2_32)
 endif()
 
+# segundo ejecutable: mundos SUB 1 (bloques de 1 cubito, terreno y arboles mas amplios). El menu principal cambia entre los dos.
+add_executable(juego_sub1 src/main.cpp src/red_sock.cpp src/mundo.h src/luz.h src/gl_loader.h src/red.h src/jugadores.h src/skin.h)
+target_compile_definitions(juego_sub1 PRIVATE SUB_VAL=1)
+target_link_libraries(juego_sub1 PRIVATE glfw Threads::Threads)
+if(WIN32)
+  target_link_libraries(juego_sub1 PRIVATE ws2_32)
+endif()
+
 # prueba del mundo sin ventana (opcional)
 add_executable(prueba_mundo src/prueba_mundo.cpp src/mundo.h)
 
 if(MSVC)
   target_compile_options(juego PRIVATE /O2 /W3 /utf-8)
+  target_compile_options(juego_sub1 PRIVATE /O2 /W3 /utf-8)
   target_compile_options(prueba_mundo PRIVATE /O2 /W3 /utf-8)
   set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT juego)
 else()
   target_compile_options(juego PRIVATE -O2 -Wall)
+  target_compile_options(juego_sub1 PRIVATE -O2 -Wall)
 endif()
