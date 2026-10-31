@@ -45,6 +45,11 @@ static std::string g_chatBuf;
 #include <string>
 #include <chrono>
 #include <filesystem>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 // ---------------------------------------------------------------- utilidades matematicas
 struct V3 { double x, y, z; };
@@ -240,6 +245,8 @@ static void juntarColumnas(const Chunk& c, SnapColumnas& sn) {
 static bool g_lodOnAntes = false;                    // v59: mundo lejano que tenias antes de ir a la Luna
 static bool g_jRespOk = false; static double g_jResp[3] = {0, 0, 0};   // v59: donde volver a aparecer en la Tierra si sales del juego en pleno viaje
 static std::string g_dirTierra;
+static bool g_irBase = false;
+static void irALaBase(double x, double d, double y, double yaw, double pitch);
 // ---------------------------------------------------------------- guardado en disco
 // Solo se guardan los chunks que cambiaste. Carpeta: mundo_SUB<N>/ (junto al juego). Formato: cabecera + datos comprimidos (RLE).
 static std::string g_dir = "mundos/mundo_1";        // carpeta del mundo elegido (se fija en el menu de mundos)
@@ -636,11 +643,17 @@ static int g_agua = 0;              // 0 simple, 1 mejorada, 2 mejorada con olas
 static int g_agua = 2;
 #endif
 static bool g_anclaOn = true;          // mantener dibujadas las zonas editadas lejanas
-static const int LOD_N = 32, LOD_NIV = 3;
-static const int LOD_CELDA[LOD_NIV] = {2, 4, 8};
-static const double LOD_ROUT[LOD_NIV] = {256.0, 640.0, 1280.0};
-static const double LOD_RIN0 = 100.0;
-static const double LOD_FOG_MAX = 1280.0;
+static const int LOD_N = 32, LOD_NIV = 4;
+static const int LOD_CELDA[LOD_NIV] = {2, 4, 8, 16};
+static const double LOD_ROUT[LOD_NIV] = {256.0, 640.0, 1280.0, 3840.0};
+static bool g_horReal = false;      // v75: opcion "horizonte real": cuarto anillo lejano (x3 de alcance) y, desde muy alto, el suelo de abajo tambien se dibuja simple
+static float g_lodCurv = 0.0f;
+static bool g_lodEsp = false;
+static bool g_altoLod = false;      // true: estas muy alto y solo se dibuja el mundo lejano (con histeresis)
+static double g_lodRin0 = 100.0;
+#define LOD_RIN0 g_lodRin0
+static inline double lodFogMax() { return g_horReal ? 3840.0 : 1280.0; }
+#define LOD_FOG_MAX lodFogMax()
 
 struct LodTile {
     int niv = 0, tx = 0, tz = 0;
@@ -844,6 +857,7 @@ static void lodDist(int niv, int tx, int tz, double px, double pz, double& dn, d
 static bool lodNecesario(int niv, int tx, int tz, double px, double pz, double margen) {
     double dn, df;
     lodDist(niv, tx, tz, px, pz, dn, df);
+    if (niv == 3 && !g_horReal) return false;
     double rin = niv == 0 ? LOD_RIN0 : LOD_ROUT[niv - 1];
     return df > rin - margen && dn < LOD_ROUT[niv] + margen;
 }
@@ -1002,20 +1016,21 @@ static bool g_espAtard = false;    // ajuste: mostrar la franja naranja del atar
 static void guardarOpciones() {
     FILE* f = std::fopen("opciones.txt", "w");
     if (!f) return;
-    std::fprintf(f, "mundo_lejano=%d\ncambios_lejanos=%d\ngraficos=%d\nrendimiento=%d\nconservar=%d\nnubes=%d\nagua=%d\ncielo=%d\nviento=%d\nmares_profundos=%d\natardecer_espacio=%d\n", (g_modoLuna ? g_lodOnAntes : g_lodOn) ? 1 : 0, g_anclaOn ? 1 : 0, g_graf ? 1 : 0, g_perf, g_conservar ? 1 : 0, g_nubes, g_agua, g_cielo, g_viento, g_nuevoProf ? 1 : 0, g_espAtard ? 1 : 0);
+    std::fprintf(f, "mundo_lejano=%d\ncambios_lejanos=%d\ngraficos=%d\nrendimiento=%d\nconservar=%d\nnubes=%d\nagua=%d\ncielo=%d\nviento=%d\nmares_profundos=%d\natardecer_espacio=%d\nhorizonte_real=%d\n", (g_modoLuna ? g_lodOnAntes : g_lodOn) ? 1 : 0, g_anclaOn ? 1 : 0, g_graf ? 1 : 0, g_perf, g_conservar ? 1 : 0, g_nubes, g_agua, g_cielo, g_viento, g_nuevoProf ? 1 : 0, g_espAtard ? 1 : 0, g_horReal ? 1 : 0);
     std::fclose(f);
 }
 static void cargarOpciones() {
     FILE* f = std::fopen("opciones.txt", "r");
     if (!f) return;
-    int v = 1, w = 1, g = 1, pf = 0, cs = 0, nb = g_nubes, ag = g_agua, ci = g_cielo, vi = g_viento, mp = 0, ae = 0;
-    int nl = std::fscanf(f, "mundo_lejano=%d cambios_lejanos=%d graficos=%d rendimiento=%d conservar=%d nubes=%d agua=%d cielo=%d viento=%d mares_profundos=%d atardecer_espacio=%d", &v, &w, &g, &pf, &cs, &nb, &ag, &ci, &vi, &mp, &ae);
+    int v = 1, w = 1, g = 1, pf = 0, cs = 0, nb = g_nubes, ag = g_agua, ci = g_cielo, vi = g_viento, mp = 0, ae = 0, hr = 0;
+    int nl = std::fscanf(f, "mundo_lejano=%d cambios_lejanos=%d graficos=%d rendimiento=%d conservar=%d nubes=%d agua=%d cielo=%d viento=%d mares_profundos=%d atardecer_espacio=%d horizonte_real=%d", &v, &w, &g, &pf, &cs, &nb, &ag, &ci, &vi, &mp, &ae, &hr);
     if (nl >= 1) { g_lodOn = v != 0; g_anclaOn = w != 0; g_graf = g != 0; }
     if (nl >= 5) { g_perf = std::max(0, std::min(2, pf)); g_conservar = cs != 0; }
     if (nl >= 7) { g_nubes = std::max(0, std::min(2, nb)); g_agua = std::max(0, std::min(2, ag)); }
     if (nl >= 9) { g_cielo = ci != 0; g_viento = vi != 0; }
     if (nl >= 10) g_nuevoProf = mp != 0;
     if (nl >= 11) g_espAtard = ae != 0;
+    if (nl >= 12) g_horReal = hr != 0;
     std::fclose(f);
 }
 
@@ -1041,6 +1056,47 @@ static bool chocaMundo(double px, double py, double pz) {
             for (int x = x0; x <= x1; x++)
                 if (esSolido(leerCubito(x, y, z))) return true;
     return false;
+}
+// coloca al jugador junto a la base lunar (x lateral, d profundidad desde la puerta hacia fuera si es negativo; y sobre el suelo)
+static void irALaBase(double x, double d, double y, double yaw, double pitch) {
+    const double px = BASE_X + 0.5 + x, pz = BASE_Z + 0.5 + d;
+    g_j.p = {px, LUNA_Y0 + y + 0.2, pz};
+    if (y > 0.5 || d < 20) g_j.p.y = std::max(g_j.p.y, alturaLuna(px, pz) + 0.5);
+    g_j.v = {0, 0, 0}; g_j.inercia = {0, 0, 0}; g_j.volar = false; g_j.yaw = yaw; g_j.pitch = pitch;
+}
+// ---------------- v63: teclado, puerta corrediza y radar de la base lunar
+static bool g_tecladoOn = false;          // escribiendo el codigo en el teclado de la puerta
+static int g_baseDig = 0;                 // cuantos digitos del codigo ya se acertaron (0..4)
+static double g_puertaT0 = -1.0;          // instante en que empezo a abrirse la puerta (<0 = no animando)
+static int g_puertaPaso = 0;              // cubitos que ya se han corrido las hojas (0..3*SUB)
+static bool g_puertaAbierta = false;
+static double g_tecladoErr = -10.0;       // instante del ultimo digito equivocado
+static int baseCodigo() {                 // el codigo depende de la semilla del mundo: 1234 o 1969
+    uint32_t h = g_semilla * 2654435761u; h ^= h >> 15; h *= 2246822519u; h ^= h >> 13;
+    return (h & 1) ? 1234 : 1969;
+}
+static int baseDigitoEsp(int i) { int c = baseCodigo(); for (int k = 3; k > i; k--) c /= 10; return c % 10; }
+static void puertaSet(int open) {         // hojas corridas 'open' cubitos hacia los lados
+    std::vector<ChunkP> su;
+    for (int lx = -6 * SUB; lx < 6 * SUB; lx++) {
+        const bool hojaI = lx >= -3 * SUB - open && lx <= -1 - open;
+        const bool hojaD = lx >= open && lx <= 3 * SUB - 1 + open;
+        for (int ld = SUB; ld < 2 * SUB; ld++) for (int ly = 0; ly < 5 * SUB; ly++)
+            escribirCubito(baseCX(lx), baseCY(ly), baseCZ(ld), (hojaI || hojaD) ? BASE_PUERTA : AIRE, su);
+    }
+    for (auto& c : su) remallarYa(c);
+    g_puertaPaso = open;
+}
+static bool puertaAbiertaReal() {
+    bool c = false; uint8_t v = leerCubito(baseCX(0), baseCY(SUB), baseCZ(SUB), &c);
+    return c && v == AIRE;
+}
+static void puertaTick(double now) {
+    if (g_puertaT0 < 0) return;
+    const int total = 3 * SUB;
+    int want = std::min(total, (int)((now - g_puertaT0) / 1.6 * total));
+    if (want > g_puertaPaso) puertaSet(want);
+    if (g_puertaPaso >= total) { g_puertaT0 = -1.0; g_puertaAbierta = true; }
 }
 static bool choca(double px, double py, double pz) { return chocaMundo(px, py, pz) || chocaVeh(px, py, pz); }
 
@@ -1095,7 +1151,8 @@ static const char* NOMBRES_SLOT[NTIPOS] = {"DESTRUIR", "PASTO", "TIERRA", "PIEDR
                                            "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA", "CARROCERIA",
                                            "NIEVE", "HIELO", "CACTUS", "HOJAS ROJAS", "HOJAS NARANJA", "HOJAS AMARILLAS", "HOJAS ROSAS", "PINO", "PASTO SECO",
                                            "MADERA SELVA", "HOJAS SELVA", "LIANA", "BAMBU", "HOJAS NEVADAS", "ARBUSTO BAYAS", "FLOR ROJA", "FLOR AMARILLA", "FLOR AZUL", "FLOR ROSA", "HIELO COMPACTO", "LAVA",
-                                           "CORAL ROJO", "CORAL ROSA", "CORAL NARANJA", "CORAL MORADO", "CORAL AMARILLO", "CORAL AZUL", "ALGA", "GRAVA", "TNT", "TNT ENCENDIDO"};
+                                           "CORAL ROJO", "CORAL ROSA", "CORAL NARANJA", "CORAL MORADO", "CORAL AMARILLO", "CORAL AZUL", "ALGA", "GRAVA", "TNT", "TNT ENCENDIDO",
+                                           "CONCRETO", "METAL", "REJILLA", "TUBERIA", "PUERTA BASE", "TECLADO", "PANTALLA", "FRANJA", "PISO BASE", "PLACA", "PLASMA FRIO", "PLASMA VERDE", "PLASMA CELESTE", "PLASMA ROJO", "PLASMA AMBAR", "ACERO ROJO", "MURO AZUL", "CABLE", "AVISO", "ARMARIO", "REJILLA REDONDA", "PANTALLA IA APAGADA", "PANTALLA IA", "CONSOLA", "BOTON IA"};
 // ---- herramientas (ids 230..241) y modo survival
 static const int HERR_BASE = 230, HERR_N = 12;
 static inline bool esHerr(int id) { return id >= HERR_BASE && id < HERR_BASE + HERR_N; }
@@ -1104,9 +1161,37 @@ static inline int herrNivel(int id) { return (id - HERR_BASE) % 4; }   // 0 made
 static const char* NOMBRES_HERR[HERR_N] = {"PICO MADERA", "PICO PIEDRA", "PICO HIERRO", "PICO DIAMANTE",
                                            "HACHA MADERA", "HACHA PIEDRA", "HACHA HIERRO", "HACHA DIAMANTE",
                                            "PALA MADERA", "PALA PIEDRA", "PALA HIERRO", "PALA DIAMANTE"};
+// ---- v81: objetos nuevos del survival (ids libres 242..249, 254, 255): materiales, kit del cohete, armadura y armas
+static const int ID_ACERO = 242, ID_COMBUS = 243, ID_KITCOH = 244, ID_CASCO = 245, ID_PECHERA = 246, ID_BOTAS = 247,
+                 ID_ESPADA = 248, ID_ESPADAP = 249, ID_MARTILLO = 254, ID_ESCUDO = 255;
+static const int ID_ARCO = 200, ID_FLECHA = 201, ID_HACHAB = 202, ID_LANZA = 203, ID_MAZA = 204, ID_DAGA = 205, ID_ESPADAL = 206;   // v82: armas medievales
+static inline bool esObjNuevo(int id) { return (id >= 200 && id <= 206) || (id >= 242 && id <= 249) || id == 254 || id == 255; }
+static inline bool esArma(int id) { return id == ID_ESPADA || id == ID_ESPADAP || id == ID_MARTILLO || id == ID_HACHAB || id == ID_LANZA || id == ID_MAZA || id == ID_DAGA || id == ID_ESPADAL; }
+struct ArmaInfo { float dano; double cd, alcance; };
+static ArmaInfo armaInfo(int id) {   // dano, segundos entre golpes y alcance
+    switch (id) {
+        case ID_DAGA: return {9.0f, 0.30, 4.5};     case ID_ESPADA: return {14.0f, 0.55, 5.5};   case ID_ESPADAL: return {18.0f, 0.70, 6.0};
+        case ID_MAZA: return {20.0f, 1.00, 5.5};    case ID_HACHAB: return {22.0f, 0.90, 5.5};   case ID_LANZA: return {16.0f, 0.60, 8.0};
+        case ID_ESPADAP: return {24.0f, 0.45, 5.5}; case ID_MARTILLO: return {38.0f, 1.10, 7.5};
+    }
+    return {5.0f, 0.5, 4.0};
+}
+static const char* nombreNuevo(int id) {
+    switch (id) {
+        case 242: return "ACERO"; case 243: return "COMBUSTIBLE"; case 244: return "KIT COHETE"; case 245: return "CASCO";
+        case 246: return "PECHERA"; case 247: return "BOTAS"; case 248: return "ESPADA";
+        case 249: return "ESP PLASMA"; case 254: return "MARTILLO"; case 255: return "ESCUDO";
+        case 200: return "ARCO"; case 201: return "FLECHA"; case 202: return "HACHA BATALLA"; case 203: return "LANZA";
+        case 204: return "MAZA"; case 205: return "DAGA"; case 206: return "ESPADA LARGA";
+    }
+    return "";
+}
 static const char* nombreSlot(int t) {
+    if (esObjNuevo(t)) return nombreNuevo(t);
     if (t == ID_SPRAY) return "SPRAY";
     if (t == ID_POLVORA) return "POLVORA";
+    if (t == ID_RADAR) return "RADAR";
+    if (t == ID_PISTOLA) return "PISTOLA DE PLASMA";
     if (esHerr(t)) return NOMBRES_HERR[t - HERR_BASE];
     return (t >= 0 && t < NTIPOS) ? NOMBRES_SLOT[t] : "";
 }
@@ -1115,6 +1200,7 @@ static int g_inv[256];                                  // cuantos cubitos (o pi
 static float g_vida = 20.0f;                            // 20 = 10 corazones
 static double g_vidaT = 0, g_danoFlash = -10, g_caidaMax = 0, g_spawnS[3] = {0, 0, 0};
 static double g_protT = 0;                              // sin dano de caida hasta este instante (tras reaparecer)
+static int g_recPag = 0;                                // v81: pagina de recetas (26 por pagina)
 static int g_pagina = 0;                                // en el menu survival: 0 objetos, 1 recetas
 struct Receta { int out, n, a, na, b, nb, c, nc; };
 static const std::vector<Receta>& recetas() {
@@ -1138,12 +1224,38 @@ static const std::vector<Receta>& recetas() {
         r.push_back({HELICE, 4, ALUMINIO, 8, 0, 0, 0, 0});
         r.push_back({CONTROL, 1, COBRE, 4, HIERRO, 4, 0, 0});
         r.push_back({ID_SPRAY, 1, ALUMINIO, 8, CARBON, 4, 0, 0});
+        r.push_back({ID_RADAR, 1, COBRE, 4, ALUMINIO, 4, 0, 0});
+        r.push_back({ID_PISTOLA, 1, ALUMINIO, 4, COBRE, 2, 0, 0});            // v67: pistola de plasma            // v63: radar de senal
+        // v81: materiales, el cohete, armaduras y armas (cantidades en cubitos: 8 cubitos = 1 bloque)
+        r.push_back({ID_ACERO, 4, HIERRO, 8, CARBON, 4, 0, 0});
+        r.push_back({ID_COMBUS, 4, CARBON, 8, AZUFRE, 2, SALITRE, 2});
+        r.push_back({ID_KITCOH, 1, ID_ACERO, 40, ALUMINIO, 24, ID_COMBUS, 16});
+        r.push_back({ID_CASCO, 1, ID_ACERO, 12, VIDRIO, 2, 0, 0});
+        r.push_back({ID_PECHERA, 1, ID_ACERO, 20, ALUMINIO, 8, 0, 0});
+        r.push_back({ID_BOTAS, 1, ID_ACERO, 10, ALUMINIO, 4, 0, 0});
+        r.push_back({ID_ESPADA, 1, ID_ACERO, 10, MADERA, 4, 0, 0});
+        r.push_back({ID_DAGA, 1, ID_ACERO, 6, MADERA, 2, 0, 0});
+        r.push_back({ID_ESPADAL, 1, ID_ACERO, 16, MADERA, 4, 0, 0});
+        r.push_back({ID_HACHAB, 1, ID_ACERO, 18, MADERA, 6, 0, 0});
+        r.push_back({ID_LANZA, 1, ID_ACERO, 8, MADERA, 10, 0, 0});
+        r.push_back({ID_MAZA, 1, ID_ACERO, 14, MADERA, 6, 0, 0});
+        r.push_back({ID_ARCO, 1, MADERA, 16, LIANA, 4, 0, 0});
+        r.push_back({ID_FLECHA, 8, MADERA, 4, ID_ACERO, 2, 0, 0});
+        r.push_back({ID_ESPADAP, 1, ALUMINIO, 8, COBRE, 6, TITANIO, 2});
+        r.push_back({ID_MARTILLO, 1, ID_ACERO, 24, MADERA, 8, AZUFRE, 4});
+        r.push_back({ID_ESCUDO, 1, ID_ACERO, 16, MADERA, 8, 0, 0});
         r.push_back({ID_POLVORA, 2, SALITRE, 3, CARBON, 1, AZUFRE, 1});     // v51: 3 salitre + 1 carbon + 1 azufre = 2 polvora
         r.push_back({TNT, 8, ID_POLVORA, 4, 0, 0, 0, 0});                 // 4 polvoras = 1 bloque de TNT (8 cubitos)
     }
     return r;
 }
-static bool puedeCraftear(const Receta& r) { return g_inv[r.a] >= r.na && (r.nb == 0 || g_inv[r.b] >= r.nb) && (r.nc == 0 || g_inv[r.c] >= r.nc); }
+static bool puedeCraftear2(const Receta& r);
+static bool recBloq(const Receta& r) { return (r.out == ID_ESPADAP || r.out == ID_MARTILLO) && g_inv[0] == 0; }   // v82: se desbloquean al derrotar al mecha (g_inv[0] = 1)
+static bool puedeCraftear(const Receta& r) {
+    if (recBloq(r)) return false;
+    return puedeCraftear2(r);
+}
+static bool puedeCraftear2(const Receta& r) { return g_inv[r.a] >= r.na && (r.nb == 0 || g_inv[r.b] >= r.nb) && (r.nc == 0 || g_inv[r.c] >= r.nc); }
 static int survClase(int tp) {   // 0 pala, 1 hacha, 2 pico, 3 sin herramienta
     if (tp == PASTO || tp == TIERRA || tp == ARENA || tp == ARCILLA || tp == NIEVE || tp == PASTO_SECO || tp == GRAVA) return 0;
     if (tp == MADERA || esHoja(tp) || tp == CACTUS || tp == MADERA_SELVA || tp == BAMBU || tp == ARBUSTO_BAYAS || tp == LIANA) return 1;
@@ -1177,7 +1289,15 @@ static double survCooldown(int tp, int mat) {   // segundos entre cubitos picado
     if (cl < 3 && esHerr(mat) && herrTipo(mat) == (cl == 0 ? 2 : cl == 1 ? 1 : 0)) vel = V[herrNivel(mat)];
     return std::max(0.05, 0.18 * dur / vel);
 }
-static void survDano(float hp) { g_vida -= hp; g_danoFlash = glfwGetTime(); }
+static float survReduccion() {   // v81: la armadura que llevas en el inventario y el escudo en la mano reducen el dano
+    float r = 0.0f;
+    if (g_inv[ID_CASCO] > 0) r += 0.12f;
+    if (g_inv[ID_PECHERA] > 0) r += 0.25f;
+    if (g_inv[ID_BOTAS] > 0) r += 0.10f;
+    if (g_material == ID_ESCUDO && g_inv[ID_ESCUDO] > 0) r += 0.30f;
+    return std::min(0.70f, r);
+}
+static void survDano(float hp) { g_vida -= hp * (1.0f - survReduccion()); g_danoFlash = glfwGetTime(); }
 // ---------------------------------------------------------------- mapa de la Tierra vista desde el espacio (v54)
 // Se calcula en un hilo aparte con las mismas funciones que genera el terreno (oceanos, biomas, hielo), alrededor del jugador,
 // y el cielo lo pega sobre la esfera: asi el planeta que ves arriba ES tu mundo.
@@ -1198,11 +1318,36 @@ static void mapaCalcular(double cx, double cz, uint32_t semilla) {
         double x = cx + ((i + 0.5) / MAPA_N - 0.5) * MAPA_SPAN, z = cz + ((j + 0.5) / MAPA_N - 0.5) * MAPA_SPAN;
         float w[BIO_N]; int dom = biomaPesos(x, z, w);
         float c[3];
-        if (dom == BIO_OCEANO) {
+        // v77: relieve y colores de superficie como el mundo lejano (sombreado por pendiente), para que se parezca a lo que veras al bajar
+        const double ce = MAPA_SPAN / MAPA_N;
+        float yc = (float)alturaTerreno(x, z);
+        float hxp = (float)alturaTerreno(x + ce, z), hxm = (float)alturaTerreno(x - ce, z), hzp = (float)alturaTerreno(x, z + ce), hzm = (float)alturaTerreno(x, z - ce);
+        float gx = (hxp - hxm) / (2.0f * (float)ce) * 6.0f, gz = (hzp - hzm) / (2.0f * (float)ce) * 6.0f;   // pendiente exagerada: a esta escala las lomas casi no se notan
+        float nyy = 1.0f / std::sqrt(gx * gx + 1.0f + gz * gz);
+        float shm = 0.62f + 0.38f * nyy * nyy;
+        shm *= 1.0f + std::max(-0.25f, std::min(0.25f, (gx * 0.5f + gz * 0.3f) * 0.6f));   // luz de lado para marcar el relieve
+        if (dom != BIO_OCEANO && yc >= WATER_LEVEL - 0.6f) {
+            const uint8_t sup = tipoSuperficie(dom, yc, (int)std::floor(x), (int)std::floor(z), false);
+            if (sup == PIEDRA) { c[0] = 0.50f; c[1] = 0.50f; c[2] = 0.52f; }
+            else if (sup == TIERRA) { c[0] = 0.45f; c[1] = 0.32f; c[2] = 0.20f; }
+            else if (sup == ARCILLA) { c[0] = 0.62f; c[1] = 0.64f; c[2] = 0.72f; }
+            else if (sup == ARENA) { c[0] = 0.86f; c[1] = 0.80f; c[2] = 0.55f; }
+            else if (sup == NIEVE) { c[0] = 0.93f; c[1] = 0.95f; c[2] = 0.99f; }
+            else if (sup == PASTO_SECO) { c[0] = 0.66f; c[1] = 0.60f; c[2] = 0.30f; }
+            else if (sup == HIELO_COMPACTO) { c[0] = 0.40f; c[1] = 0.62f; c[2] = 0.93f; }
+            else if (sup == GRAVA) { c[0] = 0.50f; c[1] = 0.48f; c[2] = 0.45f; }
+            else {
+                c[0] = 0.34f; c[1] = 0.64f; c[2] = 0.21f;
+                float m = std::min(0.6f, std::max(0.0f, (1.0f - nyy) * 1.4f));
+                c[0] += (0.45f - c[0]) * m; c[1] += (0.32f - c[1]) * m; c[2] += (0.20f - c[2]) * m;
+            }
+            for (int k = 0; k < 3; k++) c[k] *= shm;
+        } else if (dom == BIO_OCEANO) {
             float u = std::max(0.0f, -continental(x, z)), pr = std::min(1.0f, u / 0.17f);
             if (temp01(x, z) < 0.2f) { c[0] = 0.78f; c[1] = 0.88f; c[2] = 0.95f; }                       // mar polar
             else { c[0] = 0.10f + (0.02f - 0.10f) * pr; c[1] = 0.48f + (0.10f - 0.48f) * pr; c[2] = 0.62f + (0.30f - 0.62f) * pr; }
-        } else { c[0] = BC[dom][0]; c[1] = BC[dom][1]; c[2] = BC[dom][2]; }
+        } else { c[0] = 0.12f; c[1] = 0.42f; c[2] = 0.70f; }       // lagos y rios
+        (void)BC;
         uint8_t* o = &px[((size_t)j * MAPA_N + i) * 4];
         for (int k = 0; k < 3; k++) o[k] = (uint8_t)std::max(0.0f, std::min(255.0f, c[k] * 255.0f));
         o[3] = 255;
@@ -1267,7 +1412,7 @@ static void tntExplotar(const TntFusible& f, double ahora) {
         if (!esAgua(t)) escribirCubito(x, y, z, AIRE, su);
     }
     g_redEnviar = envio;
-    for (auto& c : su) remallarYa(c);
+    for (auto& c : su) remallarAsync(c);
     marcarLuzSucia(cx - r - SUB, cx + r + SUB, cy - r - SUB, cy + r + SUB, cz - r - SUB, cz + r + SUB, su);
     for (auto& c : encadenar) tntEncender(c[0], c[1], c[2], ahora, 0.35 + 0.9 * hf((uint32_t)(c[0] * 31 + c[2] * 17 + c[1])));
     const double ex = (mx + 0.5) * VS, ey = (my + 0.5) * VS, ez = (mz + 0.5) * VS;
@@ -1321,7 +1466,7 @@ static void cargarBarra() {
     for (int i = 0; i < 9 && ok; i++) ok = std::fscanf(f, "%d", &v[i]) == 1;
     std::fclose(f);
     if (!ok) return;
-    for (int i = 0; i < 9; i++) if (v[i] == VACIO || v[i] == ID_SPRAY || v[i] == ID_POLVORA || (v[i] >= 0 && v[i] < NTIPOS)) g_barra[i] = v[i];
+    for (int i = 0; i < 9; i++) if (v[i] == VACIO || v[i] == ID_SPRAY || v[i] == ID_POLVORA || v[i] == ID_RADAR || v[i] == ID_PISTOLA || esObjNuevo(v[i]) || (v[i] >= 0 && v[i] < NTIPOS)) g_barra[i] = v[i];
     aplicarSel();
 }
 static std::string archivoSurv() { return g_dir + "/survival.txt"; }
@@ -1606,6 +1751,123 @@ void main(){
             }
             if (tipo == 94) col = mix(col, vec3(1.0,0.97,0.9), 0.82);
         }
+        else if (tipo >= 95 && tipo <= 119) {                             // v63: bloques de la base lunar
+            vec3 fr = fract(vAbs - n * 0.002);
+            vec3 pc = (vAbs - n * 0.002) * uSub;
+            vec2 q = abs(n.y) > 0.5 ? fr.xz : (abs(n.x) > 0.5 ? fr.zy : fr.xy);
+            float borde = min(min(q.x, 1.0 - q.x), min(q.y, 1.0 - q.y));
+            if (tipo == 95) {                                             // concreto con juntas y manchas de oxido
+                col = vec3(0.60,0.60,0.58) * (0.90 + 0.10 * hash(floor(pc * 2.0) + 31.0));
+                col *= 0.80 + 0.20 * smoothstep(0.0, 0.05, borde);
+                float mancha = vnA(vAbs.xz * 0.9 + vAbs.y * 1.7);
+                col = mix(col, vec3(0.45,0.36,0.27), smoothstep(0.62, 0.85, mancha) * 0.30);
+            } else if (tipo == 96) {                                      // metal oscuro con remaches
+                col = vec3(0.27,0.30,0.35) * (0.92 + 0.08 * hash(floor(pc * 2.0) + 41.0));
+                col *= 0.72 + 0.28 * smoothstep(0.0, 0.06, borde);
+                if (length(vec2(min(q.x, 1.0 - q.x), min(q.y, 1.0 - q.y)) - 0.12) < 0.05) col = vec3(0.55,0.58,0.62);
+            } else if (tipo == 97) {                                      // rejilla: barras claras y huecos oscuros
+                vec2 g = fract(q * 4.0);
+                bool barra = g.x < 0.22 || g.y < 0.22;
+                col = barra ? vec3(0.52,0.54,0.58) : vec3(0.06,0.07,0.09);
+            } else if (tipo == 98) {                                      // tuberia: cilindro brillante con juntas
+                float u = abs(n.y) > 0.5 ? q.x : (abs(n.x) > 0.5 ? q.x : q.y);
+                float cil = 0.55 + 0.45 * cos((u - 0.5) * 3.14159);
+                col = vec3(0.50,0.52,0.56) * (0.55 + 0.55 * cil);
+                if (abs(n.y) < 0.5 && abs(q.y - 0.5) < 0.06) col *= 0.55;
+            } else if (tipo == 99) {                                      // hoja de la puerta: paneles biselados con tornillos
+                col = vec3(0.43,0.44,0.46) * (0.94 + 0.06 * hash(floor(pc * 2.0) + 51.0));
+                float i1 = min(min(q.x - 0.14, 0.86 - q.x), min(q.y - 0.14, 0.86 - q.y));
+                if (i1 > 0.0 && i1 < 0.05) col *= 0.60;
+                else if (i1 >= 0.05) col *= 1.10;
+                if (borde < 0.05) col *= 0.60;
+                if (length(vec2(min(q.x, 1.0 - q.x), min(q.y, 1.0 - q.y)) - 0.075) < 0.03) col = vec3(0.62,0.63,0.66);
+            } else if (tipo == 100) {                                     // teclado numerico
+                col = vec3(0.16,0.17,0.19);
+                if (q.y > 0.68 && q.y < 0.92 && q.x > 0.14 && q.x < 0.86) col = vec3(0.10,0.34,0.22) + vec3(0.0,0.18,0.0) * (0.5 + 0.5 * sin(uTime * 3.0));
+                else {
+                    vec2 b = fract(vec2(q.x * 3.0, q.y * 4.0 / 0.68 * 0.68));
+                    if (q.y < 0.64 && q.x > 0.10 && q.x < 0.90 && b.x > 0.18 && b.x < 0.82 && b.y > 0.2 && b.y < 0.8) col = vec3(0.62,0.64,0.68);
+                }
+            } else if (tipo == 101) {                                     // pantalla: lineas cian que corren
+                col = vec3(0.03,0.08,0.11);
+                float ln = smoothstep(0.80, 1.0, sin(q.y * 24.0 - uTime * 2.0 + hash(vec3(floor(pc.xz), 5.0)) * 6.0) * 0.5 + 0.5);
+                col += vec3(0.05,0.55,0.75) * ln * (0.45 + 0.55 * hash(floor(pc * 2.0) + 61.0));
+                if (borde < 0.06) col = vec3(0.12,0.14,0.17);
+            } else if (tipo == 102) {                                     // franjas de peligro
+                float d_ = fract((q.x + q.y) * 3.0);
+                col = d_ < 0.5 ? vec3(0.92,0.76,0.08) : vec3(0.08,0.08,0.09);
+            } else if (tipo == 103) {                                     // piso de cuadros
+                float ck = mod(floor(q.x * 2.0) + floor(q.y * 2.0), 2.0);
+                col = mix(vec3(0.30,0.32,0.36), vec3(0.42,0.44,0.48), ck) * (0.92 + 0.08 * hash(floor(pc * 2.0) + 71.0));
+                col *= 0.80 + 0.20 * smoothstep(0.0, 0.04, borde);
+            } else if (tipo == 110) {                                     // acero rojo de la torre: pintura roja con remaches y oxido
+                col = vec3(0.62,0.12,0.08) * (0.88 + 0.12 * hash(floor(pc * 2.0) + 91.0));
+                col *= 0.62 + 0.38 * smoothstep(0.0, 0.10, borde);
+                col = mix(col, vec3(0.30,0.12,0.06), smoothstep(0.65, 0.9, vnA(vAbs.xz * 1.3 + vAbs.y * 2.1)) * 0.5);
+                if (length(vec2(min(q.x, 1.0 - q.x), min(q.y, 1.0 - q.y)) - 0.16) < 0.06) col = vec3(0.78,0.32,0.20);
+            } else if (tipo == 111) {                                     // muro azul del silo: paneles de concreto con manchas
+                col = vec3(0.20,0.28,0.38) * (0.90 + 0.10 * hash(floor(pc * 2.0) + 101.0));
+                col *= 0.70 + 0.30 * smoothstep(0.0, 0.05, borde);
+                col *= 0.80 + 0.30 * vnA(vec2(vAbs.x + vAbs.z, vAbs.y * 0.35) * 0.8);
+            } else if (tipo == 112) {                                     // cable negro con brillo
+                col = vec3(0.05,0.05,0.06) + vec3(0.10) * smoothstep(0.35, 0.5, 0.5 - abs(q.x - 0.5));
+            } else if (tipo == 113) {                                     // aviso amarillo con letras negras
+                col = vec3(0.90,0.74,0.10);
+                if (borde < 0.08) col = vec3(0.07,0.07,0.08);
+                else if (q.y > 0.30 && q.y < 0.70 && hash(vec3(floor(q.x * 6.0), floor(pc.x + pc.z + pc.y), 7.0)) > 0.45) col = vec3(0.07,0.07,0.08);
+            } else if (tipo == 114) {                                     // armario electrico gris con luces de estado
+                col = vec3(0.38,0.40,0.42) * (0.94 + 0.06 * hash(floor(pc * 2.0) + 111.0));
+                if (abs(q.x - 0.5) < 0.025 || borde < 0.05) col *= 0.55;
+                if (length(q - vec2(0.25, 0.8)) < 0.08) col = vec3(0.95, 0.15, 0.10);
+                if (length(q - vec2(0.75, 0.8)) < 0.08) col = vec3(0.95, 0.75, 0.15);
+            } else if (tipo == 115) {                                     // rejilla circular: chapa con agujeros redondos y borde biselado
+                vec2 gq = fract(q * 3.0) - 0.5;
+                float rr = length(gq);
+                col = vec3(0.50,0.52,0.56) * (0.90 + 0.10 * hash(floor(pc * 2.0) + 121.0));
+                if (abs(n.y) > 0.5) {
+                    if (rr < 0.30) col = vec3(0.02,0.02,0.03);
+                    else if (rr < 0.37) col = vec3(0.78,0.80,0.84);
+                }
+                col *= 0.70 + 0.30 * smoothstep(0.0, 0.05, borde);
+            } else if (tipo == 116) {                                     // pantalla de la IA apagada: cristal negro azulado con borde
+                col = vec3(0.025,0.035,0.055) * (0.9 + 0.1 * hash(floor(pc * 2.0) + 131.0));
+                col += vec3(0.0,0.012,0.03) * smoothstep(0.4, 0.5, vnA(vAbs.xy * 3.0 + vAbs.z));
+            } else if (tipo == 117) {                                     // pantalla de la IA encendida: barras azules que suben y bajan
+                vec2 sq = abs(n.z) > 0.5 ? vAbs.xy : (abs(n.x) > 0.5 ? vAbs.zy : vAbs.xz);
+                float cx = floor(sq.x * uSub * 0.5);                      // columna (cada una mide un bloque)
+                float ph = hash(vec3(cx, 3.0, 17.0)) * 6.2831;
+                float sp = 0.6 + hash(vec3(cx, 9.0, 4.0)) * 1.4;
+                float alt = 0.5 + 0.45 * sin(uTime * sp + ph);            // altura de la barra: sube y baja
+                float yb = clamp((sq.y - 92.0) / 9.0, 0.0, 1.0);
+                float onbar = step(yb, alt);
+                float seg = smoothstep(0.0, 0.12, fract(sq.y * uSub * 0.5));
+                float gl = 0.30 + 0.70 * onbar * seg;
+                float punta = 1.0 - smoothstep(0.0, 0.06, abs(yb - alt));
+                col = vec3(0.04,0.20,0.55) * gl + vec3(0.30,0.70,1.0) * punta + vec3(0.0,0.03,0.10);
+                col *= 0.8 + 0.2 * sin(uTime * 2.0 + cx);
+            } else if (tipo == 118) {                                     // consola: panel gris con botones y lucecitas
+                col = vec3(0.30,0.32,0.36) * (0.92 + 0.08 * hash(floor(pc * 2.0) + 141.0));
+                col *= 0.70 + 0.30 * smoothstep(0.0, 0.05, borde);
+                vec2 gq = fract(q * 3.0) - 0.5;
+                if (abs(n.y) > 0.5 || abs(n.z) > 0.5) {
+                    float h3 = hash(vec3(floor(q * 3.0), 0.0) + floor(pc * 0.5) + 151.0);
+                    if (length(gq) < 0.17) col = h3 > 0.66 ? vec3(0.15,0.75,1.0) : (h3 > 0.33 ? vec3(0.90,0.20,0.12) : vec3(0.08,0.09,0.10));
+                }
+            } else if (tipo == 119) {                                     // boton grande rojo luminoso
+                float rr = length(q - 0.5);
+                col = vec3(0.12,0.12,0.14);
+                if (rr < 0.42) col = vec3(0.95,0.10,0.06) * (0.8 + 0.2 * sin(uTime * 4.0));
+                if (rr < 0.20) col = vec3(1.0,0.55,0.45);
+            } else if (tipo >= 105 && tipo <= 109) {                      // plasma: nucleo brillante con borde suave y pulso lento
+                vec3 pl = tipo == 105 ? vec3(0.80,0.92,1.0) : (tipo == 106 ? vec3(0.35,1.0,0.50) : (tipo == 107 ? vec3(0.20,0.85,1.0) : (tipo == 108 ? vec3(1.0,0.15,0.10) : vec3(1.0,0.68,0.22))));
+                float nuc = smoothstep(0.0, 0.30, borde);
+                float pulso = 0.90 + 0.10 * sin(uTime * (tipo == 108 ? 4.0 : 1.5) + hash(floor(pc * 0.5)) * 6.0);
+                col = mix(pl * 0.35, mix(pl, vec3(1.0), 0.35), nuc) * pulso;
+            } else {                                                      // placa clara
+                col = vec3(0.70,0.72,0.76) * (0.94 + 0.06 * hash(floor(pc * 2.0) + 81.0));
+                col *= 0.75 + 0.25 * smoothstep(0.0, 0.06, borde);
+            }
+        }
         else {                                                            // lava: manchas que se mueven despacio, del rojo oscuro al amarillo
             vec2 lp = abs(n.y) > 0.5 ? vAbs.xz : (abs(n.x) > 0.5 ? vAbs.zy : vAbs.xy);
             float l1 = vnA(lp * 1.4 + vec2(uTime * 0.05, -uTime * 0.035));
@@ -1639,7 +1901,7 @@ void main(){
     vec3 p = vAbs - n * 0.002;
     float r = (hash(floor(p * uSub)) - 0.5) * 0.16 + (hash(floor(p * uSub * 4.0) + 7.0) - 0.5) * 0.07;
     col *= 1.0 + r * ((tipo == 5 && uAguaFx > 0.5) ? 0.0 : 1.0);
-    if (tipo >= 32 && tipo < 44) {
+    if ((tipo >= 32 && tipo < 44) || (tipo >= 105 && tipo <= 109) || tipo == 117 || tipo == 119) {
         col *= mix(1.1, 1.9, uHDR);       // los LED brillan por si solos
     } else if (tipo == 84) {
         col *= mix(1.25, 2.4, uHDR);      // la lava brilla por si sola
@@ -1726,19 +1988,31 @@ layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aCol;
 uniform mat4 uVP;
 uniform vec3 uRel;
+uniform float uCurv;     // 0 = plano, 1 = curvado como la esfera de la Tierra (radio 6000)
 out vec3 vCol;
 out float vDist;
+out float vH;
 void main(){
     vec3 rel = uRel + aPos;
     vCol = aCol;
     vDist = length(rel);
+    float h = length(rel.xz);
+    vH = h;
+    if (uCurv > 0.0) {
+        const float R = 6000.0;
+        float hh = min(h, R * 0.98);
+        rel.y -= uCurv * (R - sqrt(R * R - hh * hh));
+    }
     gl_Position = uVP * vec4(rel, 1.0);
 })";
 static const char* FLOD_SRC = R"(#version 330 core
 in vec3 vCol;
 in float vDist;
+in float vH;
 out vec4 frag;
 uniform vec3 uSky;
+uniform float uFogK;     // multiplicador de niebla (baja con la altura)
+uniform float uEdge;     // radio redondo del mundo lejano (borde difuminado)
 uniform float uFogA;
 uniform float uFogB;
 uniform float uSkyMul;
@@ -1746,7 +2020,12 @@ uniform float uAlpha;
 void main(){
     float br = 0.045 + 0.955 * exp(-3.35 * (1.0 - uSkyMul));
     vec3 col = vCol * br;
-    float f = clamp((vDist - uFogA) / (uFogB - uFogA), 0.0, 1.0);
+    float f = clamp((vDist - uFogA) / (uFogB - uFogA), 0.0, 1.0) * uFogK;
+    if (vH > uEdge * 0.86) {   // borde redondo y difuminado (sin cuadros)
+        float fe = clamp((vH - uEdge * 0.86) / (uEdge * 0.14), 0.0, 1.0);
+        float n = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+        if (n < fe) discard;
+    }
     frag = vec4(mix(col, uSky, f), uAlpha);
 })";
 
@@ -1902,14 +2181,18 @@ void main(){
                 surf = mix(surf, vec3(0.52, 0.44, 0.28), smoothstep(0.62, 0.70, land) * 0.75);
                 surf = mix(surf, vec3(0.92, 0.95, 1.0), smoothstep(0.80, 0.93, abs(n.x)));
                 {   // el mapa real de ESTE mundo (oceanos, biomas, hielo) bajo el jugador
-                    vec2 uv = (p.xz + uMapaOff) / 24000.0 + 0.5;
+                    // v77: proyeccion equidistante (la misma con la que la nave entra al mundo plano): el mapa coincide con el terreno de verdad
+                    float th = acos(clamp(n.y, -1.0, 1.0));
+                    vec2 hzv = length(n.xz) > 1e-5 ? normalize(n.xz) : vec2(1.0, 0.0);
+                    vec2 uv = (hzv * RP * th + uMapaOff) / 24000.0 + 0.5;
+                    uv += vec2(vn3(q * 37.0) - 0.5, vn3(q * 37.0 + 11.0) - 0.5) * 0.0045;   // deforma un poco: rompe los cuadros del mapa
                     float mb = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
                     float usa = smoothstep(0.0, 0.05, mb) * uMapaOk;
                     vec3 mc = textureLod(uMapa, uv, 0.0).rgb * (0.88 + 0.24 * vn3(q * 9.0));
                     surf = mix(surf, mc, usa);
                 }
                 float cl = vn3(q * 1.8 + 3.0) * 0.6 + vn3(q * 4.4) * 0.4;
-                surf = mix(surf, vec3(1.0), smoothstep(0.50, 0.68, cl) * 0.85);
+                surf = mix(surf, vec3(1.0), smoothstep(0.56, 0.74, cl) * 0.5);
                 float rim = pow(1.0 - clamp(dot(n, -d), 0.0, 1.0), 3.0);
                 vec3 pc = surf * luz + haze * rim * (0.35 + 0.65 * luz);
                 col = mix(col, pc, pv);
@@ -2092,13 +2375,20 @@ constexpr bool SOLO_VISIBLE = false;
 #include "vehiculo.h"
 #include "cohete.h"
 #include "jugadores.h"
+#include "jefe.h"
 
 
 // ---------------------------------------------------------------- mundos (menu que aparece al iniciar)
 struct InfoMundo { std::string carpeta, nombre; uint32_t semilla = 0; int chunks = 0; long long t = 0; };
 static const char* RAIZ_MUNDOS = SUB == 2 ? "mundos" : (SUB == 1 ? "mundos_sub1" : (SUB == 4 ? "mundos_sub4" : "mundos_sub8"));   // cada SUB guarda sus mundos aparte (no son compatibles)
 static std::vector<InfoMundo> g_mundos;
-static int g_pantalla = 1;                 // 0 = menu de mundos, 1 = juego
+static int g_pantalla = 1;                 // 0 = lista de mundos, 1 = juego, 2 = inicio, 3 = multijugador
+static bool g_argHost = false;
+static std::string g_argUnir, g_argNombre;
+static int g_argPuerto = RED_PUERTO;
+static bool g_volverMenu = false;          // "guardar y salir": al cerrar la partida se reinicia el juego en el menu de inicio
+static std::string g_unirElegido, g_ipTexto, g_errorInicio;
+static bool g_conectando = false;
 static int g_mundoElegido = -1;
 static bool g_crearNuevo = false;
 static int g_confBorrar = -1, g_scrollM = 0;
@@ -2216,6 +2506,77 @@ static void mundosClamp() {
     g_scrollM = std::max(0, std::min(g_scrollM, (int)g_mundos.size() - b.vis));
 }
 
+
+// ---- partidas en la red local (WiFi): el anfitrion anuncia por UDP y el menu las lista
+struct LanSrv { std::string ip, nombre; int puerto = 0, jug = 0; double t = 0; };
+static std::vector<LanSrv> g_lan;
+static int g_lanSock = -1, g_scrollL = 0;
+static const int LAN_PUERTO = 25577;
+static double g_lanTx = 0;
+static void lanAbrir() { if (g_lanSock < 0) g_lanSock = rs_udp_abrir(LAN_PUERTO); }
+static void lanCerrar() { if (g_lanSock >= 0) { rs_close(g_lanSock); g_lanSock = -1; } g_lan.clear(); }
+static void lanSondear(double ahora) {
+    if (g_lanSock < 0) return;
+    char b[256], ip[64];
+    for (int i = 0; i < 40; i++) {
+        int n = rs_udp_recibir(g_lanSock, b, 255, ip, sizeof ip);
+        if (n <= 0) break;
+        b[n] = 0; if (std::getenv("LAN_DEBUG")) std::fprintf(stderr, "LAN rx: %s de %s\n", b, ip);
+        int puerto = 0, jug = 0; char nom[128] = "";
+        if (std::sscanf(b, "JVOX1|%d|%d|%127[^\n]", &puerto, &jug, nom) < 2 || puerto <= 0) continue;
+        bool hallado = false;
+        for (auto& l : g_lan) if (l.ip == ip && l.puerto == puerto) { l.jug = jug; l.nombre = nom; l.t = ahora; hallado = true; }
+        if (!hallado) { LanSrv l; l.ip = ip; l.puerto = puerto; l.jug = jug; l.nombre = nom; l.t = ahora; g_lan.push_back(l); }
+    }
+    for (size_t i = 0; i < g_lan.size();) { if (ahora - g_lan[i].t > (std::getenv("LAN_EXP") ? std::atof(std::getenv("LAN_EXP")) : 5.0)) g_lan.erase(g_lan.begin() + i); else i++; }
+}
+static void lanAnunciar(double ahora, const std::string& nombre, int puerto, int jug) {
+    if (ahora - g_lanTx < 1.0) return;
+    g_lanTx = ahora;
+    char b[200];
+    int n = std::snprintf(b, sizeof b, "JVOX1|%d|%d|%s", puerto, jug, nombre.c_str());
+    if (n > 0) rs_udp_difundir(LAN_PUERTO, b, std::min(n, (int)sizeof b - 1));
+}
+// geometria del menu de inicio y del multijugador
+static MRect tituloRect(int fbw, int fbh, int i) {
+    float k = std::max(0.8f, fbh / 720.0f), w = 460 * k, h = 62 * k, gap = 16 * k;
+    return {(fbw - w) / 2.0f, fbh * 0.34f + i * (h + gap), w, h};
+}
+struct MLBase { float k, x0, w, y0, hFila, gap; int vis; };
+static MLBase lanBase(int fbw, int fbh) {
+    MLBase b; b.k = std::max(0.8f, fbh / 720.0f);
+    b.w = std::min(fbw * 0.88f, 760.0f * b.k); b.x0 = (fbw - b.w) / 2.0f;
+    b.y0 = 150 * b.k; b.hFila = 58 * b.k; b.gap = 10 * b.k;
+    b.vis = std::max(1, (int)((fbh - b.y0 - 230 * b.k) / (b.hFila + b.gap)));
+    return b;
+}
+static MRect lanFila(const MLBase& b, int v) { return {b.x0, b.y0 + v * (b.hFila + b.gap), b.w, b.hFila}; }
+static MRect lanCampo(const MLBase& b, int fbh) { return {b.x0, fbh - 168 * b.k, b.w * 0.62f, 46 * b.k}; }
+static MRect lanUnir(const MLBase& b, int fbh) { return {b.x0 + b.w * 0.64f, fbh - 168 * b.k, b.w * 0.36f, 46 * b.k}; }
+static MRect lanVolver(const MLBase& b, int fbh) { return {b.x0, fbh - 108 * b.k, b.w * 0.30f, 44 * b.k}; }
+// pantalla 2: 0..3 botones.  pantalla 3: 10 volver, 11 unir por IP, 12+i servidor i
+static int inicioHit(double mx, double my) {
+    double px = mx * g_fbW / std::max(1, g_winW), py = my * g_fbH / std::max(1, g_winH);
+    if (g_pantalla == 2) { for (int i = 0; i < 4; i++) if (mDentro(tituloRect(g_fbW, g_fbH, i), px, py)) return i; return -1; }
+    MLBase b = lanBase(g_fbW, g_fbH);
+    if (mDentro(lanVolver(b, g_fbH), px, py)) return 10;
+    if (mDentro(lanUnir(b, g_fbH), px, py)) return 11;
+    for (int v = 0; v < b.vis; v++) { int gi = g_scrollL + v; if (gi >= (int)g_lan.size()) break; if (mDentro(lanFila(b, v), px, py)) return 12 + gi; }
+    return -1;
+}
+static void inicioAccion(GLFWwindow* w, int h) {
+    if (g_pantalla == 2) {
+        if (h == 0) g_crearNuevo = true;
+        else if (h == 1) { g_mundos = listarMundos(); g_scrollM = 0; g_confBorrar = -1; g_pantalla = 0; }
+        else if (h == 2) { g_errorInicio.clear(); lanAbrir(); g_pantalla = 3; }
+        else if (h == 3) glfwSetWindowShouldClose(w, 1);
+    } else if (g_pantalla == 3) {
+        if (h == 10) { lanCerrar(); g_pantalla = 2; }
+        else if (h == 11 && !g_ipTexto.empty()) g_unirElegido = g_ipTexto;
+        else if (h >= 12 && h - 12 < (int)g_lan.size()) g_unirElegido = g_lan[h - 12].ip + ":" + std::to_string(g_lan[h - 12].puerto);
+    }
+}
+
 static void alMouse(GLFWwindow*, double x, double y) {
     if (!g_capturado) { g_mx = x; g_my = y; return; }
     if (g_primerMouse) { g_mx = x; g_my = y; g_primerMouse = false; }
@@ -2246,10 +2607,10 @@ static MRect graficosRect(int fbw, int fbh) { MRect r = pausaRect(fbw, fbh, 3); 
 static MRect ajustesRect(int fbw, int fbh) { MRect r = pausaRect(fbw, fbh, 3); float k = std::max(0.8f, fbh / 720.0f); r.x += r.w - 120 * k; r.w = 120 * k; return r; }
 static int pausaHit(double mx, double my) {
     double px = mx * g_fbW / std::max(1, g_winW), py = my * g_fbH / std::max(1, g_winH);
-    if (g_pausaSub) { for (int i = 0; i < 7; i++) if (mDentro(pausaRect(g_fbW, g_fbH, i), px, py)) return i; return -1; }
+    if (g_pausaSub) { for (int i = 0; i < 8; i++) if (mDentro(pausaRect(g_fbW, g_fbH, i), px, py)) return i; return -1; }
     if (mDentro(ajustesRect(g_fbW, g_fbH), px, py)) return 10;
     if (mDentro(graficosRect(g_fbW, g_fbH), px, py)) return 3;
-    for (int i = 0; i < 8; i++) if (mDentro(pausaRect(g_fbW, g_fbH, i), px, py)) return i;
+    for (int i = 0; i < 9; i++) if (mDentro(pausaRect(g_fbW, g_fbH, i), px, py)) return i;
     return -1;
 }
 static std::vector<int> g_menuItems;       // objetos que muestra el menu (creativo: todos; survival: los que tienes)
@@ -2258,6 +2619,8 @@ static const int MENU_PAG = 50;
 static int menuPaginas() { return std::max(1, ((int)g_menuItems.size() + MENU_PAG - 1) / MENU_PAG); }
 static void alRueda(GLFWwindow*, double, double dy) {
     if (g_pantalla == 0) { g_scrollM += dy > 0 ? -1 : 1; mundosClamp(); return; }
+    if (g_pantalla == 3) { MLBase b = lanBase(g_fbW, g_fbH); g_scrollL = std::max(0, std::min(g_scrollL + (dy > 0 ? -1 : 1), (int)g_lan.size() - b.vis)); return; }
+    if (g_pantalla == 2) return;
     if (g_menu && !g_pausa) { if (!(g_survival && g_pagina == 1)) { g_menuPag = std::max(0, std::min(menuPaginas() - 1, g_menuPag + (dy > 0 ? -1 : 1))); } return; }
     if (g_menu || g_pausa) return;
     g_sel = (g_sel + (dy > 0 ? 1 : -1) + 9) % 9;
@@ -2336,6 +2699,7 @@ static void survCraftear(int idx) {
     const auto& R = recetas();
     if (idx < 0 || idx >= (int)R.size()) return;
     const Receta& r = R[idx];
+    if (recBloq(r)) { g_aviso = "BLOQUEADO: DERROTA AL MECHA DE LA LUNA"; g_avisoT = glfwGetTime(); return; }
     if (!puedeCraftear(r)) { g_aviso = "TE FALTAN MATERIALES"; g_avisoT = glfwGetTime(); return; }
     g_inv[r.a] -= r.na; if (r.nb) g_inv[r.b] -= r.nb; if (r.nc) g_inv[r.c] -= r.nc;
     g_inv[r.out] = std::min(9999, g_inv[r.out] + r.n);
@@ -2353,17 +2717,28 @@ static void survCambiarModo() {
     g_avisoT = glfwGetTime();
     aplicarSel(); guardarSurv(); guardarBarra();
 }
+static void tecladoDigito(int d) {
+    if (g_puertaAbierta || g_baseDig >= 4) return;
+    if (d == baseDigitoEsp(g_baseDig)) {
+        g_baseDig++;
+        if (g_baseDig >= 4) { g_tecladoOn = false; g_puertaT0 = glfwGetTime(); g_aviso = "CODIGO CORRECTO: LA PUERTA SE ABRE"; g_avisoT = glfwGetTime(); }
+    } else { g_tecladoErr = glfwGetTime(); }
+}
 static void alChar(GLFWwindow*, unsigned int cp) {
+    if (g_pantalla == 3) { if (((cp >= '0' && cp <= '9') || cp == '.' || cp == ':') && g_ipTexto.size() < 24) g_ipTexto += (char)cp; return; }
     if (g_chat && cp >= 32 && cp < 127 && g_chatBuf.size() < 100) g_chatBuf += (char)cp;
 }
 static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
+    if (g_pantalla == 3 && tecla == GLFW_KEY_BACKSPACE && (accion == GLFW_PRESS || accion == GLFW_REPEAT) && !g_ipTexto.empty()) { g_ipTexto.pop_back(); return; }
     if (g_chat && (accion == GLFW_PRESS || accion == GLFW_REPEAT)) {      // escribiendo un mensaje
         if (tecla == GLFW_KEY_ESCAPE) g_chat = false;
         else if (tecla == GLFW_KEY_ENTER || tecla == GLFW_KEY_KP_ENTER) {
             if (!g_chatBuf.empty()) {
                 std::string cm = g_chatBuf; for (auto& ch : cm) ch = (char)std::tolower((unsigned char)ch);
-                if (cm == "/cohete") g_pedirCohete = true;
+                if (cm == "/cohete") { if (g_survival && g_inv[ID_KITCOH] <= 0) aviso("NECESITAS UN KIT COHETE (RECETAS)"); else { if (g_survival) g_inv[ID_KITCOH]--; g_pedirCohete = true; } }
+                if (cm == "/cohetemoderno" || cm == "/cohetebase") { if (g_ck.activo && !g_modoLuna) aviso("BAJA PRIMERO DE LA NAVE"); else if (g_survival && g_inv[ID_KITCOH] <= 0) aviso("NECESITAS UN KIT COHETE (RECETAS)"); else { if (g_survival) g_inv[ID_KITCOH]--; g_cohRepon = true; g_cohRepTp = false; if (!g_modoLuna) g_lunaPend = true; } }       // v71c: repone el cohete moderno de la base lunar
                 if (cm == "/luna") g_lunaPend = true;       // (prueba) ir directo al mundo de la Luna
+                if (cm == "/base") { if (g_modoLuna) irALaBase(0, 9, 1, 0, 0); else { g_irBase = true; g_lunaPend = true; } }   // (prueba) ir a la puerta de la base lunar
                 else if (cm[0] == '/') { g_aviso = "COMANDO DESCONOCIDO. COMANDOS: /COHETE"; g_avisoT = glfwGetTime(); }
                 else if (g_red.activo()) g_red.chatEnviar(g_chatBuf);
             }
@@ -2372,9 +2747,20 @@ static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
         else if (tecla == GLFW_KEY_BACKSPACE && !g_chatBuf.empty()) g_chatBuf.pop_back();
         return;
     }
+    if (g_tecladoOn && (accion == GLFW_PRESS || accion == GLFW_REPEAT) && !g_chat) {       // teclado de la puerta de la base
+        if (tecla == GLFW_KEY_ESCAPE || tecla == GLFW_KEY_BACKSPACE) { g_tecladoOn = false; return; }
+        int d = (tecla >= 48 && tecla <= 57) ? tecla - 48 : (tecla >= 320 && tecla <= 329) ? tecla - 320 : -1;
+        if (d >= 0) { if (accion == GLFW_PRESS) tecladoDigito(d); return; }
+    }
     if (accion != GLFW_PRESS) return;
+    if (g_pantalla == 2) { if (tecla == GLFW_KEY_ESCAPE) glfwSetWindowShouldClose(w, 1); return; }
+    if (g_pantalla == 3) {
+        if (tecla == GLFW_KEY_ESCAPE) inicioAccion(w, 10);
+        else if (tecla == GLFW_KEY_ENTER || tecla == GLFW_KEY_KP_ENTER) inicioAccion(w, 11);
+        return;
+    }
     if (g_pantalla == 0) {
-        if (tecla == GLFW_KEY_ESCAPE) { if (g_confBorrar >= 0) g_confBorrar = -1; else glfwSetWindowShouldClose(w, 1); }
+        if (tecla == GLFW_KEY_ESCAPE) { if (g_confBorrar >= 0) g_confBorrar = -1; else g_pantalla = 2; }
         else if (tecla == GLFW_KEY_N) g_crearNuevo = true;
         else if (tecla == GLFW_KEY_P) { g_nuevoProf = !g_nuevoProf; guardarOpciones(); }
         else if ((tecla == GLFW_KEY_ENTER || tecla == GLFW_KEY_KP_ENTER) && !g_mundos.empty() && g_confBorrar < 0) g_mundoElegido = 0;
@@ -2436,7 +2822,7 @@ static void alTecla(GLFWwindow* w, int tecla, int, int accion, int) {
     if (tecla >= GLFW_KEY_1 && tecla <= GLFW_KEY_9) { g_sel = tecla - GLFW_KEY_1; aplicarSel(); }
 }
 static void alClic(GLFWwindow* w, int boton, int accion, int) {
-    if (accion == GLFW_RELEASE && g_menu && g_pantalla != 0 && !g_pausa && boton == GLFW_MOUSE_BUTTON_LEFT && g_mano != -100) {
+    if (accion == GLFW_RELEASE && g_menu && g_pantalla == 1 && !g_pausa && boton == GLFW_MOUSE_BUTTON_LEFT && g_mano != -100) {
         double dx = g_mx - g_manoX, dy = g_my - g_manoY;
         if (dx * dx + dy * dy > 36.0) {                       // fue un arrastre: soltar donde esta el cursor (si no hay casilla, se cancela)
             int j = barraEn(g_mx, g_my);
@@ -2445,6 +2831,10 @@ static void alClic(GLFWwindow* w, int boton, int accion, int) {
         return;
     }
     if (accion != GLFW_PRESS) return;
+    if (g_pantalla == 2 || g_pantalla == 3) {
+        if (boton == GLFW_MOUSE_BUTTON_LEFT) { int h = inicioHit(g_mx, g_my); if (h >= 0) inicioAccion(w, h); }
+        return;
+    }
     if (g_pantalla == 0) {
         if (boton != GLFW_MOUSE_BUTTON_LEFT) return;
         int tipo, idx;
@@ -2467,7 +2857,8 @@ static void alClic(GLFWwindow* w, int boton, int accion, int) {
             else if (b == 3) { g_viento = !g_viento; guardarOpciones(); }
             else if (b == 4) { g_graf = !g_graf; guardarOpciones(); }
             else if (b == 5) { g_espAtard = !g_espAtard; guardarOpciones(); }
-            else if (b == 6) g_pausaSub = 0;
+            else if (b == 6) { g_horReal = !g_horReal; if (g_horReal && !g_lodOn) g_lodOn = true; guardarOpciones(); lodLiberarTodo(); }
+            else if (b == 7) g_pausaSub = 0;
             return;
         }
         if (b == 10) { g_pausaSub = 1; return; }
@@ -2478,7 +2869,13 @@ static void alClic(GLFWwindow* w, int boton, int accion, int) {
         else if (b == 4) survCambiarModo();
         else if (b == 5) { g_perf = (g_perf + 1) % 3; aplicarPerf(); guardarOpciones(); }
         else if (b == 6) { g_conservar = !g_conservar; guardarOpciones(); }
-        else if (b == 7) glfwSetWindowShouldClose(w, 1);
+        else if (b == 7) {      // abrir la partida a la red local (WiFi)
+            if (!g_red.activo()) {
+                if (g_red.hospedar(g_argPuerto)) { g_argHost = true; aviso(("RED ABIERTA: " + std::string(rs_ip_local()) + ":" + std::to_string(g_argPuerto)).c_str()); }
+                else aviso(g_red.error.c_str());
+            }
+        }
+        else if (b == 8) { g_volverMenu = true; glfwSetWindowShouldClose(w, 1); }
         return;
     }
     if (g_menu) {
@@ -2487,7 +2884,10 @@ static void alClic(GLFWwindow* w, int boton, int accion, int) {
             double qx = g_mx * g_fbW / std::max(1, g_winW), qy = g_my * g_fbH / std::max(1, g_winH);
             for (int tj = 0; tj < 2; tj++) if (mDentro(tabRect(g_fbW, g_fbH, tj), qx, qy)) { g_pagina = tj; return; }
             if (g_pagina == 1) {
-                for (int ri = 0; ri < (int)recetas().size(); ri++) if (mDentro(recRect(g_fbW, g_fbH, ri), qx, qy)) { survCraftear(ri); menuReconstruir(); return; }
+                const int NP = ((int)recetas().size() + 25) / 26;
+                if (g_recPag < NP - 1 && mDentro(flechaRect(g_fbW, g_fbH, 1), qx, qy)) { g_recPag++; return; }
+                if (g_recPag > 0 && mDentro(flechaRect(g_fbW, g_fbH, 0), qx, qy)) { g_recPag--; return; }
+                for (int li = 0; li < 26 && g_recPag * 26 + li < (int)recetas().size(); li++) if (mDentro(recRect(g_fbW, g_fbH, li), qx, qy)) { survCraftear(g_recPag * 26 + li); menuReconstruir(); return; }
             }
         }
         if (boton == GLFW_MOUSE_BUTTON_LEFT && !(g_survival && g_pagina == 1)) {   // flechas de pagina
@@ -2624,12 +3024,60 @@ static const float ICON_C[NTIPOS][3] = {{0.45f, 0.10f, 0.10f}, {0.34f, 0.64f, 0.
 static const float ICON_NEW[NTIPOS - NIEVE][3] = {{0.93f, 0.95f, 0.99f}, {0.60f, 0.80f, 0.96f}, {0.25f, 0.55f, 0.25f}, {0.78f, 0.13f, 0.10f}, {0.93f, 0.47f, 0.08f}, {0.94f, 0.80f, 0.13f}, {0.98f, 0.64f, 0.78f}, {0.09f, 0.33f, 0.19f}, {0.66f, 0.60f, 0.30f},
                                               {0.36f, 0.22f, 0.14f}, {0.07f, 0.40f, 0.12f}, {0.14f, 0.45f, 0.13f}, {0.56f, 0.74f, 0.26f}, {0.92f, 0.95f, 0.97f}, {0.16f, 0.42f, 0.14f},
                                               {0.90f, 0.12f, 0.12f}, {0.98f, 0.85f, 0.12f}, {0.22f, 0.35f, 0.95f}, {0.98f, 0.45f, 0.75f}, {0.40f, 0.62f, 0.93f}, {0.98f, 0.45f, 0.08f},
-                                              {0.92f, 0.20f, 0.22f}, {0.98f, 0.46f, 0.70f}, {0.98f, 0.52f, 0.14f}, {0.62f, 0.28f, 0.88f}, {0.98f, 0.84f, 0.18f}, {0.20f, 0.50f, 0.95f}, {0.14f, 0.50f, 0.20f}, {0.50f, 0.48f, 0.45f}, {0.80f, 0.12f, 0.10f}, {0.98f, 0.95f, 0.92f}};
+                                              {0.92f, 0.20f, 0.22f}, {0.98f, 0.46f, 0.70f}, {0.98f, 0.52f, 0.14f}, {0.62f, 0.28f, 0.88f}, {0.98f, 0.84f, 0.18f}, {0.20f, 0.50f, 0.95f}, {0.14f, 0.50f, 0.20f}, {0.50f, 0.48f, 0.45f}, {0.80f, 0.12f, 0.10f}, {0.98f, 0.95f, 0.92f},
+                                              {0.60f, 0.60f, 0.58f}, {0.27f, 0.30f, 0.35f}, {0.45f, 0.47f, 0.52f}, {0.50f, 0.52f, 0.56f}, {0.43f, 0.44f, 0.46f}, {0.30f, 0.45f, 0.40f}, {0.10f, 0.45f, 0.60f}, {0.92f, 0.76f, 0.08f}, {0.36f, 0.38f, 0.42f}, {0.70f, 0.72f, 0.76f},
+                                              {0.80f, 0.92f, 1.0f}, {0.35f, 1.0f, 0.50f}, {0.20f, 0.85f, 1.0f}, {1.0f, 0.15f, 0.10f},
+                                              {1.0f, 0.68f, 0.22f}, {0.62f, 0.12f, 0.08f}, {0.20f, 0.28f, 0.38f}, {0.06f, 0.06f, 0.07f}, {0.90f, 0.74f, 0.10f}, {0.38f, 0.40f, 0.42f}, {0.50f, 0.52f, 0.56f},
+                                              {0.04f, 0.06f, 0.10f}, {0.20f, 0.60f, 1.0f}, {0.30f, 0.32f, 0.36f}, {0.90f, 0.15f, 0.10f}};
 static inline const float* iconColor(int id) { return id >= NIEVE ? ICON_NEW[id - NIEVE] : ICON_C[id]; }
 // icono de un material (o de la herramienta "destruir" en el hueco 0)
+static void hIconoNuevo(int id, float x, float y, float c) {   // v81: iconos de los objetos nuevos (cuadricula de 6x6)
+    static const char* P[17][6] = {
+        {"......", ".####.", "#hhhh#", "######", ".####.", "......"},            // acero: lingote
+        {"..oo..", ".####.", ".#rr#.", ".#rr#.", ".####.", "......"},            // combustible: bidon
+        {"..W...", ".WWW..", ".WRW..", ".WWW..", "WWWWW.", ".O.O.."},            // kit cohete
+        {".####.", "######", "#vvvv#", "#....#", "#....#", "......"},            // casco
+        {"##..##", "######", ".####.", ".####.", ".####.", "......"},            // pechera
+        {"......", ".#..#.", ".#..#.", ".#..#.", "##..##", "......"},            // botas
+        {"....bb", "...bb.", "..bb..", "h.b...", ".hh...", "h.h..."},            // espada de acero
+        {"....bb", "...bb.", "..bb..", "h.b...", ".hh...", "h.h..."},            // espada de plasma
+        {"CCCC..", "CCCCh.", "CCCC.h", "..h..h", "...h..", "....h."},            // martillo
+        {"######", "#CCCC#", "#CCCC#", ".#CC#.", "..##..", "......"},            // escudo
+        {".h....", "h.s...", "h..s..", "h..s..", "h.s...", ".h...."},            // arco
+        {"....pp", "...pp.", "..h...", ".h....", "fh....", "f....."},            // flecha
+        {".CC...", "CCCC..", "CCCCh.", ".CChh.", "..h...", "..h..."},            // hacha de batalla
+        {"...bbb", "...bb.", "..h...", ".h....", "h.....", "h....."},            // lanza
+        {"..CC..", ".CCCC.", ".CCCC.", "..CC..", "..h...", "..h..."},            // maza
+        {"....b.", "...b..", "..b...", ".h....", "h.h...", "......"},            // daga
+        {"....bb", "...bbb", "..bbb.", ".bbb..", "hbb...", "hh...."}};            // espada larga
+    const int k = id == 254 ? 8 : id == 255 ? 9 : id >= 242 ? id - 242 : 10 + (id - 200);
+    float cr = 0.62f, cg = 0.66f, cb = 0.72f, br = 0.78f, bg = 0.80f, bb = 0.84f;
+    if (id == 249) { br = 0.30f; bg = 0.95f; bb = 1.0f; }                    // plasma
+    if (id == 254) { cr = 0.45f; cg = 0.47f; cb = 0.52f; }
+    for (int j = 0; j < 6; j++) for (int i = 0; i < 6; i++) {
+        char ch = P[k][j][i];
+        if (ch == '.') continue;
+        float r = cr, g = cg, b = cb;
+        if (ch == 'h') { r = 0.42f; g = 0.28f; b = 0.16f; }
+        else if (ch == 'b') { r = br; g = bg; b = bb; }
+        else if (ch == 'v') { r = 0.25f; g = 0.80f; b = 1.0f; }
+        else if (ch == 's' || ch == 'f') { r = 0.92f; g = 0.92f; b = 0.90f; }
+        else if (ch == 'p') { r = 0.70f; g = 0.72f; b = 0.76f; }
+        else if (ch == 'W') { r = 0.92f; g = 0.93f; b = 0.95f; }
+        else if (ch == 'R') { r = 0.85f; g = 0.15f; b = 0.12f; }
+        else if (ch == 'O') { r = 1.0f; g = 0.60f; b = 0.12f; }
+        else if (ch == 'o') { r = 0.95f; g = 0.50f; b = 0.10f; }
+        else if (ch == 'r') { r = 0.80f; g = 0.12f; b = 0.10f; }
+        else if (ch == 'C') { r = id == 255 ? 0.20f : cr; g = id == 255 ? 0.45f : cg; b = id == 255 ? 0.85f : cb; }
+        else if (ch == '#' && id == 243) { r = 0.55f; g = 0.15f; b = 0.12f; }
+        float v = 0.9f + (hh(i, j, 300 + id) - 0.5f) * 0.2f;
+        hRect(x + i * c, y + j * c, c + 0.5f, c + 0.5f, r * v, g * v, b * v);
+    }
+}
 static void hIcono(int slot, float x, float y, float s) {
     const int N = 6;
     float c = s / N;
+    if (esObjNuevo(slot)) { hIconoNuevo(slot, x, y, c); return; }
     if (slot == ID_POLVORA) {   // montoncito de polvo gris oscuro con motas
         for (int j = 2; j < N; j++) for (int i = 0; i < N; i++) {
             int alt = 5 - std::abs(2 * i - 5) / 2 - 1;       // forma de monton
@@ -2639,6 +3087,21 @@ static void hIcono(int slot, float x, float y, float s) {
         }
         hRect(x + 2 * c, y + 3 * c, c, c, 0.55f, 0.55f, 0.58f);
         hRect(x + 4 * c, y + 4 * c, c, c, 0.40f, 0.40f, 0.44f);
+        return;
+    }
+    if (slot == ID_PISTOLA) {   // pistola de plasma: cuerpo oscuro, cañon celeste brillante
+        for (int i = 0; i < 6; i++) hRect(x + i * c, y + 2 * c, c + 0.5f, c + 0.5f, 0.35f, 0.37f, 0.42f);
+        for (int i = 0; i < 6; i++) hRect(x + i * c, y + 3 * c, c + 0.5f, c + 0.5f, 0.25f, 0.27f, 0.32f);
+        hRect(x + 6 * c, y + 2 * c, c + 0.5f, c * 2 + 0.5f, 0.35f, 0.90f, 1.0f);
+        for (int j = 4; j < 7; j++) hRect(x + 1 * c, y + j * c, c + 0.5f, c + 0.5f, 0.22f, 0.24f, 0.28f);
+        hRect(x + 3 * c, y + 2 * c, c + 0.5f, c * 0.6f, 0.2f, 0.8f, 1.0f);
+        return;
+    }
+    if (slot == ID_RADAR) {   // radar: cuerpo gris oscuro, pantalla verde con un punto y antena
+        for (int j = 1; j < N; j++) for (int i = 0; i < N; i++) hRect(x + i * c, y + j * c, c + 0.5f, c + 0.5f, 0.20f, 0.22f, 0.26f);
+        for (int j = 2; j < 5; j++) for (int i = 1; i < 5; i++) hRect(x + i * c, y + j * c, c + 0.5f, c + 0.5f, 0.05f, 0.30f, 0.20f);
+        hRect(x + 3 * c, y + 3 * c, c + 0.5f, c + 0.5f, 0.50f, 1.0f, 0.60f);
+        hRect(x + 5 * c, y + 0 * c, c * 0.5f, c * 1.2f, 0.75f, 0.77f, 0.80f);
         return;
     }
     if (slot == ID_SPRAY) {   // lata de spray con la tapa del color elegido
@@ -2857,7 +3320,8 @@ static bool itemHerrSprite(int id, float col[8][8][3], bool fill[8][8]) {
 }
 static bool g_golpea = false;   // este cuadro estas picando/poniendo (para la animacion de la mano y para los otros jugadores)
 static uint8_t objetoEnMano() {
-    if (g_material < 0 || g_material == 0 || g_material == ID_POLVORA) return 255;
+    if (g_material < 0 || g_material == 0 || g_material == ID_POLVORA || g_material == ID_RADAR || esObjNuevo(g_material)) return 255;
+    if (g_material == ID_PISTOLA) return 253;
     if (g_survival && g_inv[g_material] <= 0) return 255;
     return (uint8_t)g_material;
 }
@@ -2943,7 +3407,7 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
         std::snprintf(b, sizeof b, "%d", i + 1);
         hTexto(b, sx + 4 * k, y0 + 3 * k, std::max(2.0f, t - 1), 1, 1, 1);
     }
-    if (g_survival && !(g_veh.activo && g_veh.pilotando) && !g_ck.activo) {
+    if ((g_survival || g_jefeAct()) && !(g_veh.activo && g_veh.pilotando) && !g_ck.activo) {
         float hs = 18 * k;
         for (int i = 0; i < 10; i++) {
             int lleno = g_vida >= 2 * (i + 1) ? 2 : (g_vida >= 2 * i + 1 ? 1 : 0);
@@ -2951,7 +3415,14 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
         }
     }
     if (glfwGetTime() - g_explDestello < 0.5) hRect(0, 0, (float)fbw, (float)fbh, 1.0f, 0.95f, 0.8f, (float)(0.85 * g_explFuerza * (1.0 - (glfwGetTime() - g_explDestello) / 0.5)));
-    if (g_survival && glfwGetTime() - g_danoFlash < 0.4) hRect(0, 0, (float)fbw, (float)fbh, 0.85f, 0.0f, 0.0f, 0.35f * (float)(1.0 - (glfwGetTime() - g_danoFlash) / 0.4));
+    if ((g_survival || g_jefeAct()) && glfwGetTime() - g_danoFlash < 0.4) hRect(0, 0, (float)fbw, (float)fbh, 0.85f, 0.0f, 0.0f, 0.35f * (float)(1.0 - (glfwGetTime() - g_danoFlash) / 0.4));
+    if (g_modoLuna && g_mecha.viva) {        // barra de vida del mecha (v67)
+        const float bw = fbw * 0.5f, bx = (fbw - bw) / 2.0f, by = 18.0f * k, fr = std::max(0.0f, g_mecha.hp / g_mecha.hpMax);
+        hRect(bx - 3 * k, by - 3 * k, bw + 6 * k, 16 * k, 0.0f, 0.0f, 0.0f, 0.75f);
+        hRect(bx, by, bw * fr, 10 * k, 0.85f, 0.08f, 0.06f);
+        hRect(bx, by, bw * fr, 3 * k, 1.0f, 0.45f, 0.35f);
+        hTexto("MECHA DE LA IA", (fbw - hAncho("MECHA DE LA IA", t)) / 2.0f, by + 14 * k, t, 1.0f, 0.5f, 0.45f);
+    }
     if (!g_menu && !(g_veh.activo && g_veh.pilotando) && !g_ck.activo) {
         char nm[64];
         if (g_material < 0) std::snprintf(nm, sizeof nm, "MANO VACIA");
@@ -2978,20 +3449,21 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
     }
     if (g_ck.activo) {      // instrumentos del cohete
         const Cohete& c = g_ck;
+        const bool espacio = !g_modoLuna && !c.reentrada;
         char ib[120];
         float iy = fbh * 0.30f;
         double alt = (c.fase < 2 ? c.P.y : c.e2.p.y), vel = c.fase == 0 ? 0.0 : (c.fase == 1 ? c.sp : std::sqrt(c.V.x * c.V.x + c.V.y * c.V.y + c.V.z * c.V.z));
         std::snprintf(ib, sizeof ib, "VELOCIDAD %d KM/H", (int)(vel * 3.6)); hTexto(ib, 12 * k, iy, t, 0.8f, 1.0f, 0.8f); iy += lh;
         std::snprintf(ib, sizeof ib, "ALTURA %d BLOQUES", (int)alt); hTexto(ib, 12 * k, iy, t, 0.8f, 1.0f, 0.8f); iy += lh;
-        const char* fase = c.fase == 0 ? "CUENTA ATRAS" : (c.fase == 1 ? "ETAPA 1 ENCENDIDA" : (c.llegada ? "LUNA ALCANZADA" : c.quema ? "MOTOR ENCENDIDO" : g_terraFija ? "RUMBO A LA LUNA" : "ORBITA - GRAVEDAD 0"));
+        const char* fase = (c.bloques && c.pad && !c.quema) ? "EN LA PLATAFORMA: MANTEN 2 PARA DESPEGAR" : c.reentrada ? (c.espCarga ? "CARGANDO LA TIERRA..." : "DESCENSO: FRENA CON 2 (PROA AL CIELO)") : c.vuelta ? "RUMBO A LA TIERRA (SHIFT+2: IMPULSO DE SALTO)" : c.fase == 0 ? "CUENTA ATRAS" : (c.fase == 1 ? "ETAPA 1 ENCENDIDA" : (c.llegada ? "LUNA ALCANZADA" : c.quema ? "MOTOR ENCENDIDO" : g_terraFija ? "RUMBO A LA LUNA" : "ORBITA - GRAVEDAD 0"));
         hTexto(fase, 12 * k, iy, t, 1.0f, 0.9f, 0.5f); iy += lh;
         if (c.fase == 1) { std::snprintf(ib, sizeof ib, "SEPARACION EN %d BLOQUES", std::max(0, (int)(1500.0 - (c.P.y - c.y0)))); hTexto(ib, 12 * k, iy, t, 0.7f, 0.85f, 1.0f); iy += lh; }
         if (c.fase == 2) {
             std::snprintf(ib, sizeof ib, "COMBUSTIBLE %d", (int)(c.fuel + 0.5)); hTexto(ib, 12 * k, iy, t, c.fuel > 20 ? 0.8f : 1.0f, c.fuel > 20 ? 1.0f : 0.5f, 0.6f); iy += lh;
-            if (!g_modoLuna) { double lz = ckLuzSuelo(c.e2.p); std::snprintf(ib, sizeof ib, "LUZ EN EL SUELO %d %s", (int)std::max(0.0, lz * 100.0), lz < 0.30 ? "- OSCURO: BUSCA EL LADO CLARO" : "- SE PUEDE ATERRIZAR"); hTexto(ib, 12 * k, iy, t, lz < 0.30 ? 1.0f : 0.5f, lz < 0.30 ? 0.6f : 1.0f, 0.5f); iy += lh; }
-            std::snprintf(ib, sizeof ib, "LUNA A %d BLOQUES", (int)g_ckM.dist); hTexto(ib, 12 * k, iy, t, 0.85f, 0.85f, 1.0f); iy += lh;
+            if (espacio && !c.vuelta) { double lz = ckLuzSuelo(c.e2.p); std::snprintf(ib, sizeof ib, "LUZ EN EL SUELO %d %s", (int)std::max(0.0, lz * 100.0), lz < 0.30 ? "- OSCURO: BUSCA EL LADO CLARO" : "- SE PUEDE ATERRIZAR"); hTexto(ib, 12 * k, iy, t, lz < 0.30 ? 1.0f : 0.5f, lz < 0.30 ? 0.6f : 1.0f, 0.5f); iy += lh; }
+            if (espacio) { std::snprintf(ib, sizeof ib, c.vuelta ? "TIERRA A %d BLOQUES" : "LUNA A %d BLOQUES", (int)g_ckM.dist); hTexto(ib, 12 * k, iy, t, 0.85f, 0.85f, 1.0f); iy += lh; }
             double gr = g_ckM.ang * 57.29578;
-            std::snprintf(ib, sizeof ib, "PUNTERIA %.1f GRADOS%s", gr, gr < 3.0 ? " - BIEN" : ""); hTexto(ib, 12 * k, iy, t, gr < 3.0 ? 0.4f : 1.0f, gr < 3.0 ? 1.0f : 0.8f, 0.4f); iy += lh;
+            if (espacio) { std::snprintf(ib, sizeof ib, "PUNTERIA %.1f GRADOS%s", gr, gr < 3.0 ? " - BIEN" : ""); hTexto(ib, 12 * k, iy, t, gr < 3.0 ? 0.4f : 1.0f, gr < 3.0 ? 1.0f : 0.8f, 0.4f); iy += lh; }
             // marcadores
             auto marca = [&](float mx, float my, bool dentro, const char* txt, float r, float g, float b, float sz) {
                 float h = sz * k;
@@ -2999,9 +3471,10 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
                 else hRect(mx - h * 0.5f, my - h * 0.5f, h, h, r, g, b);
                 hTexto(txt, mx - hAncho(txt, t) / 2.0f, my + h + 3 * k, t, r, g, b);
             };
-            if (c.llegada == false) marca(g_ckM.lx, g_ckM.ly, g_ckM.lDentro, "LUNA", 0.85f, 0.9f, 1.0f, 22);
-            else if (!g_modoLuna) marca(g_ckM.sx, g_ckM.sy, g_ckM.sDentro, "SOL", 1.0f, 0.9f, 0.4f, 18);
-            { float h = 9 * k; float px_ = g_ckM.px, py_ = g_ckM.py; float cr = gr < 3.0 ? 0.4f : 1.0f, cg = 1.0f, cb = gr < 3.0 ? 0.4f : 0.7f;
+            if (!espacio) {}
+            else if (c.llegada == false) marca(g_ckM.lx, g_ckM.ly, g_ckM.lDentro, c.vuelta ? "TIERRA" : "LUNA", 0.85f, 0.9f, 1.0f, 22);
+            else if (espacio) marca(g_ckM.sx, g_ckM.sy, g_ckM.sDentro, "SOL", 1.0f, 0.9f, 0.4f, 18);
+            if (espacio) { float h = 9 * k; float px_ = g_ckM.px, py_ = g_ckM.py; float cr = gr < 3.0 ? 0.4f : 1.0f, cg = 1.0f, cb = gr < 3.0 ? 0.4f : 0.7f;
               hRect(px_ - h, py_ - 1 * k, 2 * h, 2 * k, cr, cg, cb); hRect(px_ - 1 * k, py_ - h, 2 * k, 2 * h, cr, cg, cb);
               hTexto("PROA", px_ - hAncho("PROA", t) / 2.0f, py_ + h + 3 * k, t, cr, cg, cb); }
         }
@@ -3011,12 +3484,55 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
             hTexto(nb, (fbw - hAncho(nb, tb)) / 2.0f, fbh * 0.30f, tb, 1.0f, 0.85f, 0.3f);
         }
 #ifndef MOVIL
-        const char* ayuda = c.fase == 2 ? "W/S A/D Q/E: GIRAR   MANTEN 2: MOTOR   3: DESCENDER (SOLO DONDE HAY LUZ)   MOUSE: CAMARA   TAB: CABINA"
+        const char* ayuda = c.vuelta ? "W/S A/D Q/E: GIRAR   MANTEN 2: MOTOR   SHIFT+2: IMPULSO DE SALTO   MOUSE: CAMARA   TAB: CABINA" : c.reentrada ? "MANTEN 2 PARA FRENAR   W/S A/D Q/E: GIRAR   MOUSE: CAMARA   TAB: CABINA" : c.bloques ? "W/S A/D Q/E: GIRAR   MANTEN 2: MOTOR   MOUSE: CAMARA   TAB: CABINA   G: BAJAR (SOLO EN LA PLATAFORMA)" : c.fase == 2 ? "W/S A/D Q/E: GIRAR   MANTEN 2: MOTOR   3: DESCENDER (SOLO DONDE HAY LUZ)   MOUSE: CAMARA   TAB: CABINA"
                                         : "MOUSE: CAMARA   TAB: CABINA   G: CANCELAR Y VOLVER A LA TIERRA";
         float pa = t;
         while (pa > 1 && hAncho(ayuda, pa) > fbw - 24 * k) pa -= 1;
         hTexto(ayuda, (fbw - hAncho(ayuda, pa)) / 2.0f, fbh - 14 * k - 7 * pa, pa, 0.9f, 0.9f, 0.9f);
 #endif
+    }
+    if (g_modoLuna && !g_ck.activo && g_material == ID_RADAR) {      // radar de senal (v63)
+        const double ahoraR = glfwGetTime();
+        const double dx = (BASE_X + 0.5) - g_j.p.x, dz = (BASE_Z + 0.5) - g_j.p.z;
+        const double dist = std::sqrt(dx * dx + dz * dz);
+        const double rel = std::atan2(dx, -dz) - g_j.yaw;
+        const float S = 46 * k, cx = fbw - 12 * k - S - 60 * k, cy = 70 * k + S;
+        hRect(cx - S - 6 * k, cy - S - 6 * k, 2 * S + 12 * k + 120 * k, 2 * S + 12 * k + 30 * k, 0.03f, 0.08f, 0.06f, 0.82f);
+        hMarco(cx - S - 6 * k, cy - S - 6 * k, 2 * S + 12 * k + 120 * k, 2 * S + 12 * k + 30 * k, std::max(2.0f, 2 * k), 0.2f, 0.8f, 0.5f);
+        for (int i = 0; i < 24; i++) { double a = i * 6.2831853 / 24; hRect(cx + (float)std::sin(a) * S - k, cy - (float)std::cos(a) * S - k, 2 * k, 2 * k, 0.15f, 0.55f, 0.35f); }
+        const double bip = 0.5 + 0.5 * std::sin(ahoraR * 5.0);
+        for (int i = 1; i <= 10; i++) { double r = S * 0.85 * i / 10.0; hRect(cx + (float)(std::sin(rel) * r) - k, cy - (float)(std::cos(rel) * r) - k, 2 * k + (i == 10 ? 2 * k : 0), 2 * k + (i == 10 ? 2 * k : 0), 0.4f, 1.0f, 0.6f, 0.4f + 0.6f * (float)bip * i / 10.0f); }
+        hRect(cx - 2 * k, cy - 2 * k, 4 * k, 4 * k, 0.9f, 1.0f, 0.9f);
+        char rb[64];
+        float tx = cx + S + 14 * k, ty = cy - S + 2 * k;
+        std::snprintf(rb, sizeof rb, "BASE %d M", (int)dist); hTexto(rb, tx, ty, t, 0.6f, 1.0f, 0.7f); ty += lh;
+        if (!g_puertaAbierta && dist < 40 && puertaAbiertaReal()) { g_puertaAbierta = true; g_baseDig = 4; }
+        if (g_puertaAbierta || g_baseDig >= 4) hTexto("ABIERTA", tx, ty, t, 0.5f, 1.0f, 0.5f);
+        else if (dist > 160.0) hTexto("SENAL DEBIL", tx, ty, t, 0.8f, 0.9f, 0.5f);
+        else {
+            const int dg = baseDigitoEsp(g_baseDig);
+            static const char* MORSE[10] = {"-----", ".----", "..---", "...--", "....-", ".....", "-....", "--...", "---..", "----."};
+            const char* pm = MORSE[dg];
+            double dur = 0; for (const char* q = pm; *q; ++q) dur += (*q == '.' ? 0.25 : 0.75) + 0.25;
+            const double ciclo = dur + 2.0;
+            double tt = std::fmod(ahoraR, ciclo); bool on = false; double acc = 0;
+            for (const char* q = pm; *q; ++q) { double l = (*q == '.' ? 0.25 : 0.75); if (tt >= acc && tt < acc + l) on = true; acc += l + 0.25; }
+            std::snprintf(rb, sizeof rb, "DIGITO %d DE 4", g_baseDig + 1); hTexto(rb, tx, ty, t, 0.9f, 0.95f, 0.8f); ty += lh;
+            const float L = 22 * k;
+            hRect(tx, ty + 2 * k, L, L, on ? 1.0f : 0.15f, on ? 0.9f : 0.12f, on ? 0.2f : 0.05f);
+            hMarco(tx, ty + 2 * k, L, L, std::max(1.0f, k), 0.8f, 0.8f, 0.7f);
+        }
+    }
+    if (g_tecladoOn) {      // teclado de la puerta de la base
+        const float W = 300 * k, H = 120 * k, x0 = (fbw - W) / 2.0f, y0 = fbh * 0.28f;
+        const bool err = glfwGetTime() - g_tecladoErr < 1.2;
+        hRect(x0, y0, W, H, 0.02f, 0.05f, 0.07f, 0.9f);
+        hMarco(x0, y0, W, H, std::max(2.0f, 2 * k), err ? 1.0f : 0.2f, err ? 0.3f : 0.8f, err ? 0.3f : 0.9f);
+        hTexto("CODIGO DE ACCESO", x0 + (W - hAncho("CODIGO DE ACCESO", t)) / 2.0f, y0 + 10 * k, t, 0.6f, 0.9f, 1.0f);
+        char cb[16]; for (int i = 0; i < 4; i++) cb[i] = i < g_baseDig ? '*' : '_'; cb[4] = 0;
+        const float tb = t * 3; hTexto(cb, x0 + (W - hAncho(cb, tb)) / 2.0f, y0 + 36 * k, tb, 0.5f, 1.0f, 0.8f);
+        char db[48]; std::snprintf(db, sizeof db, "DIGITO %d DE 4", g_baseDig + 1);
+        hTexto(err ? "INCORRECTO" : db, x0 + (W - hAncho(err ? "INCORRECTO" : db, t)) / 2.0f, y0 + H - 22 * k, t, err ? 1.0f : 0.8f, err ? 0.4f : 0.9f, err ? 0.4f : 0.8f);
     }
     if (glfwGetTime() - g_avisoT < 4.0 && !g_aviso.empty()) {
         float ta = t + 1;
@@ -3044,8 +3560,17 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
             hBoton(tabRect(fbw, fbh, 1), k, g_pagina == 1 ? 0.20f : 0.10f, g_pagina == 1 ? 0.45f : 0.20f, g_pagina == 1 ? 0.25f : 0.14f, mDentro(tabRect(fbw, fbh, 1), qx, qy), "RECETAS", t);
             if (g_pagina == 1) {
                 const auto& R = recetas();
-                for (int ri = 0; ri < (int)R.size(); ri++) {
-                    MRect rr = recRect(fbw, fbh, ri);
+                const int NP = ((int)R.size() + 25) / 26;
+                g_recPag = std::max(0, std::min(g_recPag, NP - 1));
+                if (NP > 1) {
+                    char pg[24]; std::snprintf(pg, sizeof pg, "PAG %d/%d", g_recPag + 1, NP);
+                    hBoton(flechaRect(fbw, fbh, 0), k, 0.10f, 0.20f, 0.14f, mDentro(flechaRect(fbw, fbh, 0), qx, qy), "<", t * 1.5f);
+                    hBoton(flechaRect(fbw, fbh, 1), k, 0.10f, 0.20f, 0.14f, mDentro(flechaRect(fbw, fbh, 1), qx, qy), ">", t * 1.5f);
+                    hTexto(pg, tabRect(fbw, fbh, 0).x - hAncho(pg, t) - 14 * k, 44 * k, t, 0.9f, 0.9f, 0.9f);
+                }
+                for (int li = 0; li < 26 && g_recPag * 26 + li < (int)R.size(); li++) {
+                    const int ri = g_recPag * 26 + li;
+                    MRect rr = recRect(fbw, fbh, li);
                     bool ok = puedeCraftear(R[ri]), hv = mDentro(rr, qx, qy);
                     hRect(rr.x, rr.y, rr.w, rr.h, ok ? 0.10f : 0.08f, ok ? 0.28f : 0.08f, ok ? 0.12f : 0.08f, 0.92f);
                     hMarco(rr.x, rr.y, rr.w, rr.h, std::max(2.0f, 2 * k), hv ? 1.0f : 0.3f, hv ? 0.85f : 0.3f, hv ? 0.2f : 0.3f);
@@ -3059,6 +3584,7 @@ static void hdibujar(int fbw, int fbh, int fps, bool cargando, bool guardado, do
                     float p1 = std::max(2.0f, t - 1), p2 = std::max(1.0f, t - 1);
                     hTexto(l1, rr.x + rr.h + 4 * k, rr.y + 4 * k, p1, 1, 1, 1);
                     hTexto(l2, rr.x + rr.h + 4 * k, rr.y + 4 * k + 9 * p1, p2, ok ? 0.6f : 0.9f, ok ? 1.0f : 0.5f, ok ? 0.6f : 0.5f);
+                    if (recBloq(R[ri])) { hRect(rr.x, rr.y, rr.w, rr.h, 0.0f, 0.0f, 0.0f, 0.55f); hTexto("BLOQUEADO: DERROTA AL MECHA", rr.x + rr.w - hAncho("BLOQUEADO: DERROTA AL MECHA", p2) - 6 * k, rr.y + 4 * k, p2, 1.0f, 0.55f, 0.25f); }
                 }
             }
         }
@@ -3188,6 +3714,61 @@ static void mundosDibujar(int fbw, int fbh) {
     hTexto(ay, (fbw - hAncho(ay, t)) / 2.0f, fbh - 36 * k - 12 * t, t, 1.0f, 1.0f, 1.0f);
 }
 
+static void fondoInicio(int fbw, int fbh, float k, float t, const char* sub) {
+    hRect(0, 0, (float)fbw, 118 * k, 0.04f, 0.05f, 0.08f, 0.8f);
+    float cuadro = 36 * k;
+    for (int i = 0; i * cuadro < fbw; i++) {
+        float h = 0.8f + 0.4f * hh(i, 3, 7);
+        hRect(i * cuadro, fbh - cuadro, cuadro + 1, cuadro, 0.30f * h, 0.20f * h, 0.12f * h, 1.0f);
+        hRect(i * cuadro, fbh - cuadro, cuadro + 1, cuadro * 0.3f, 0.26f * h, 0.52f * h, 0.17f * h, 1.0f);
+    }
+    float tp = std::max(4.0f, std::floor(6.0f * k));
+    const char* ti = "JUEGO VOXEL";
+    hTexto(ti, (fbw - hAncho(ti, tp)) / 2.0f, 18 * k, tp, 1.0f, 0.88f, 0.35f);
+    hTexto(sub, (fbw - hAncho(sub, t)) / 2.0f, 18 * k + 9 * tp + 6 * k, t, 0.85f, 0.88f, 0.95f);
+}
+static void inicioDibujar(int fbw, int fbh) {
+    float k = std::max(0.8f, fbh / 720.0f), t = std::max(2.0f, std::floor(2.0f * k + 0.5f));
+    int hov = inicioHit(g_mx, g_my);
+    if (g_pantalla == 2) {
+        fondoInicio(fbw, fbh, k, t, "MENU PRINCIPAL");
+        hBoton(tituloRect(fbw, fbh, 0), k, 0.16f, 0.50f, 0.22f, hov == 0, "CREAR MUNDO", t * 1.6f);
+        hBoton(tituloRect(fbw, fbh, 1), k, 0.14f, 0.30f, 0.52f, hov == 1, "MIS MUNDOS", t * 1.6f);
+        hBoton(tituloRect(fbw, fbh, 2), k, 0.38f, 0.24f, 0.55f, hov == 2, "MULTIJUGADOR", t * 1.6f);
+        hBoton(tituloRect(fbw, fbh, 3), k, 0.45f, 0.14f, 0.14f, hov == 3, "SALIR", t * 1.6f);
+        return;
+    }
+    fondoInicio(fbw, fbh, k, t, "MULTIJUGADOR - PARTIDAS EN TU WIFI");
+    MLBase b = lanBase(fbw, fbh);
+    if (g_lan.empty()) {
+        const char* m = g_conectando ? "CONECTANDO Y BAJANDO EL MUNDO..." : "BUSCANDO PARTIDAS EN LA RED...";
+        hTexto(m, (fbw - hAncho(m, t)) / 2.0f, b.y0 + 14 * k, t, 0.85f, 0.85f, 0.85f);
+        if (!g_conectando) { const char* m2 = "EL ANFITRION DEBE PULSAR ABRIR A LA RED WIFI EN SU PAUSA"; hTexto(m2, (fbw - hAncho(m2, t * 0.9f)) / 2.0f, b.y0 + 14 * k + 12 * t, t * 0.9f, 0.75f, 0.78f, 0.85f); }
+    }
+    for (int v = 0; v < b.vis; v++) {
+        int gi = g_scrollL + v;
+        if (gi >= (int)g_lan.size()) break;
+        const LanSrv& l = g_lan[gi];
+        MRect r = lanFila(b, v);
+        bool h = hov == 12 + gi;
+        hRect(r.x, r.y, r.w, r.h, h ? 0.20f : 0.10f, h ? 0.24f : 0.13f, h ? 0.32f : 0.18f, 0.92f);
+        hMarco(r.x, r.y, r.w, r.h, std::max(2.0f, 2 * k), h ? 1.0f : 0.3f, h ? 0.85f : 0.3f, h ? 0.3f : 0.35f, 1.0f);
+        hTexto(l.nombre.c_str(), r.x + 14 * k, r.y + 5 * k, t * 1.2f, 1, 1, 1);
+        char inf[96]; std::snprintf(inf, sizeof inf, "%s:%d  |  JUGADORES: %d", l.ip.c_str(), l.puerto, l.jug);
+        hTexto(inf, r.x + 14 * k, r.y + r.h - 6 * k - 7 * t * 0.8f, std::max(1.0f, t * 0.8f), 0.7f, 0.8f, 0.9f);
+        hTexto("UNIRSE", r.x + r.w - hAncho("UNIRSE", t * 1.2f) - 14 * k, r.y + (r.h - 7 * t * 1.2f) / 2.0f, t * 1.2f, 0.4f, 1.0f, 0.5f);
+    }
+    MRect c = lanCampo(b, fbh);
+    hTexto("O ESCRIBE LA IP DEL ANFITRION (EJ 192.168.1.5):", c.x, c.y - 14 * k - 7 * t * 0.9f, std::max(1.0f, t * 0.9f), 0.85f, 0.88f, 0.95f);
+    hRect(c.x, c.y, c.w, c.h, 0.05f, 0.06f, 0.09f, 0.95f);
+    hMarco(c.x, c.y, c.w, c.h, std::max(2.0f, 2 * k), 0.8f, 0.8f, 0.4f, 1.0f);
+    std::string ip = g_ipTexto + (((int)(glfwGetTime() * 2)) % 2 ? "_" : "");
+    hTexto(ip.c_str(), c.x + 10 * k, c.y + (c.h - 7 * t * 1.3f) / 2.0f, t * 1.3f, 1, 1, 1);
+    hBoton(lanUnir(b, fbh), k, 0.16f, 0.50f, 0.22f, hov == 11, "UNIRSE", t * 1.4f);
+    hBoton(lanVolver(b, fbh), k, 0.30f, 0.32f, 0.38f, hov == 10, "VOLVER", t * 1.3f);
+    if (!g_errorInicio.empty()) hTexto(g_errorInicio.c_str(), b.x0 + b.w * 0.32f + 14 * k, fbh - 108 * k + 14 * k, t, 1.0f, 0.5f, 0.45f);
+}
+
 static void pausaDibujar(int fbw, int fbh) {
     float k = std::max(0.8f, fbh / 720.0f), t = std::max(2.0f, std::floor(2.0f * k + 0.5f));
     hRect(0, 0, (float)fbw, (float)fbh, 0, 0, 0, 0.58f);
@@ -3208,9 +3789,11 @@ static void pausaDibujar(int fbw, int fbh) {
                g_graf ? "SOMBRAS Y EFECTOS: ON" : "SOMBRAS Y EFECTOS: OFF", t * 1.25f);
         hBoton(pausaRect(fbw, fbh, 5), k, g_espAtard ? 0.16f : 0.45f, g_espAtard ? 0.36f : 0.20f, g_espAtard ? 0.60f : 0.20f, hov == 5,
                g_espAtard ? "ATARDECER EN EL ESPACIO: SI" : "ATARDECER EN EL ESPACIO: NO", t * 1.25f);
-        hBoton(pausaRect(fbw, fbh, 6), k, 0.16f, 0.50f, 0.22f, hov == 6, "VOLVER", t * 1.5f);
+        hBoton(pausaRect(fbw, fbh, 6), k, g_horReal ? 0.16f : 0.45f, g_horReal ? 0.36f : 0.20f, g_horReal ? 0.60f : 0.20f, hov == 6,
+               g_horReal ? "HORIZONTE REAL: ON" : "HORIZONTE REAL: OFF", t * 1.25f);
+        hBoton(pausaRect(fbw, fbh, 7), k, 0.16f, 0.50f, 0.22f, hov == 7, "VOLVER", t * 1.5f);
         const char* ay2 = "LAS NUBES VOLUMETRICAS NECESITAN SOMBRAS Y EFECTOS ON";
-        hTexto(ay2, (fbw - hAncho(ay2, t)) / 2.0f, pausaRect(fbw, fbh, 8).y, t, 0.8f, 0.8f, 0.85f);
+        hTexto(ay2, (fbw - hAncho(ay2, t)) / 2.0f, pausaRect(fbw, fbh, 9).y, t, 0.8f, 0.8f, 0.85f);
         return;
     }
     hBoton(pausaRect(fbw, fbh, 0), k, 0.16f, 0.50f, 0.22f, hov == 0, "CONTINUAR", t * 1.5f);
@@ -3228,15 +3811,17 @@ static void pausaDibujar(int fbw, int fbh) {
     }
     hBoton(pausaRect(fbw, fbh, 6), k, g_conservar ? 0.16f : 0.45f, g_conservar ? 0.36f : 0.20f, g_conservar ? 0.60f : 0.20f, hov == 6,
            g_conservar ? "CONSERVAR CHUNKS: SI" : "CONSERVAR CHUNKS: NO", t * 1.25f);
-    hBoton(pausaRect(fbw, fbh, 7), k, 0.45f, 0.14f, 0.14f, hov == 7, "GUARDAR Y SALIR", t * 1.5f);
+    {
+        bool rojo = g_red.activo();
+        hBoton(pausaRect(fbw, fbh, 7), k, rojo ? 0.10f : 0.12f, rojo ? 0.45f : 0.34f, rojo ? 0.30f : 0.50f, hov == 7,
+               g_red.host ? "RED WIFI: ABIERTA" : (g_red.cli ? "RED: CONECTADO" : "ABRIR A LA RED WIFI"), t * 1.25f);
+    }
+    hBoton(pausaRect(fbw, fbh, 8), k, 0.45f, 0.14f, 0.14f, hov == 8, "GUARDAR Y SALIR", t * 1.5f);
     const char* ay = "ESC: CONTINUAR";
-    hTexto(ay, (fbw - hAncho(ay, t)) / 2.0f, pausaRect(fbw, fbh, 8).y, t, 0.8f, 0.8f, 0.85f);
+    hTexto(ay, (fbw - hAncho(ay, t)) / 2.0f, pausaRect(fbw, fbh, 9).y, t, 0.8f, 0.8f, 0.85f);
 }
 
 // ---------------------------------------------------------------- principal
-static bool g_argHost = false;
-static std::string g_argUnir, g_argNombre;
-static int g_argPuerto = RED_PUERTO;
 static void leerArgs(int argc, char** argv) {   // --hospedar [puerto]   --unir IP[:puerto]   --nombre X
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -3496,6 +4081,20 @@ static void benchTick(double dtReal, double ahora) {
     }
 }
 
+// se conecta al anfitrion (ip o ip:puerto) y baja su mundo; deja g_dir/g_semilla listos
+static bool unirseAMundo(const std::string& dest) {
+    std::string ip = dest; int puerto = RED_PUERTO;
+    size_t dp = ip.rfind(':');
+    if (dp != std::string::npos) { puerto = std::atoi(ip.c_str() + dp + 1); ip = ip.substr(0, dp); }
+    std::string safe = ip; for (char& ch : safe) if (!std::isalnum((unsigned char)ch)) ch = '_';
+    std::printf("RED: conectando a %s:%d ...\n", ip.c_str(), puerto);
+    std::fflush(stdout);
+    g_dir = std::string(RAIZ_MUNDOS) + "/red_" + safe;
+    if (!g_red.unirse(ip, puerto, g_dir)) return false;
+    g_semilla = g_red.semilla; g_nombreMundo = "red " + ip; g_argUnir = dest;
+    return true;
+}
+
 static int juego_main() {
     if (!glfwInit()) { std::fprintf(stderr, "No se pudo iniciar GLFW\n"); return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -3520,19 +4119,12 @@ static int juego_main() {
     bool redSpawn = false;
     if (!g_argNombre.empty()) g_red.miNombre = g_argNombre;
     if (!g_argUnir.empty()) {       // unirse a la partida de otro jugador: se baja su mundo y se salta el menu
-        std::string ip = g_argUnir; int puerto = RED_PUERTO;
-        size_t dp = ip.rfind(':');
-        if (dp != std::string::npos) { puerto = std::atoi(ip.c_str() + dp + 1); ip = ip.substr(0, dp); }
-        std::string safe = ip; for (char& ch : safe) if (!std::isalnum((unsigned char)ch)) ch = '_';
-        std::printf("RED: conectando a %s:%d ...\n", ip.c_str(), puerto);
-        std::fflush(stdout);
-        g_dir = std::string(RAIZ_MUNDOS) + "/red_" + safe;
-        if (!g_red.unirse(ip, puerto, g_dir)) {
+        if (!unirseAMundo(g_argUnir)) {
             std::printf("RED: %s\n", g_red.error.c_str());
             glfwTerminate();
             return 1;
         }
-        g_semilla = g_red.semilla; g_nombreMundo = "red " + ip; redSpawn = true;
+        redSpawn = true;
         g_pantalla = 1;
     } else if (const char* em = std::getenv("MUNDO")) {      // (pruebas) saltar el menu: MUNDO=<carpeta> [SEMILLA=n]
         g_dir = std::string(RAIZ_MUNDOS) + "/" + em;
@@ -3541,8 +4133,8 @@ static int juego_main() {
         if (const char* es = std::getenv("SEMILLA")) g_semilla = (uint32_t)std::strtoul(es, nullptr, 10);
         g_nombreMundo = em;
         g_pantalla = 1;
-    } else g_pantalla = 0;
-    if (g_pantalla == 0) {
+    } else g_pantalla = 2;
+    if (g_pantalla != 1) {
         g_capturado = false;
         glfwSetInputMode(ventana, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
     } else {
@@ -3612,29 +4204,44 @@ static int juego_main() {
         glDisable(GL_BLEND);
     };
 
-    // ---- menu de mundos (siempre al iniciar)
-    if (g_pantalla == 0) {
+    // ---- menu de inicio (siempre al iniciar): crear mundo / mis mundos / multijugador
+    if (g_pantalla != 1) {
         g_mundos = listarMundos();
-        while (!glfwWindowShouldClose(ventana) && g_mundoElegido < 0 && !g_crearNuevo) {
+        auto frameInicio = [&]() {
             g_tac.ui = true; g_tac.uiJuego = false;
             glfwPollEvents();
             int fbw, fbh;
             glfwGetFramebufferSize(ventana, &fbw, &fbh);
             g_fbW = fbw; g_fbH = fbh;
             glfwGetWindowSize(ventana, &g_winW, &g_winH);
-            if (fbw < 1 || fbh < 1) { glfwSwapBuffers(ventana); continue; }
+            if (fbw < 1 || fbh < 1) { glfwSwapBuffers(ventana); return; }
+            if (g_pantalla == 3) lanSondear(glfwGetTime());
             mundosClamp();
             glViewport(0, 0, fbw, fbh);
             glClearColor(0.42f, 0.62f, 0.90f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             g_hud.clear();
-            mundosDibujar(fbw, fbh);
+            if (g_pantalla == 0) mundosDibujar(fbw, fbh); else inicioDibujar(fbw, fbh);
             subirHud(fbw, fbh);
             glfwSwapBuffers(ventana);
+        };
+        for (;;) {
+            while (!glfwWindowShouldClose(ventana) && g_mundoElegido < 0 && !g_crearNuevo && g_unirElegido.empty()) frameInicio();
+            if (glfwWindowShouldClose(ventana)) { lanCerrar(); glfwTerminate(); return 0; }
+            if (!g_unirElegido.empty()) {
+                g_conectando = true; g_errorInicio.clear();
+                frameInicio(); frameInicio();
+                bool ok = unirseAMundo(g_unirElegido);
+                g_conectando = false;
+                if (ok) { redSpawn = true; break; }
+                g_errorInicio = g_red.error; g_red.cerrar(); g_unirElegido.clear();
+                continue;
+            }
+            InfoMundo m = g_crearNuevo ? crearMundo() : g_mundos[g_mundoElegido];
+            g_dir = m.carpeta; g_semilla = m.semilla; g_nombreMundo = m.nombre;
+            break;
         }
-        if (glfwWindowShouldClose(ventana)) { glfwTerminate(); return 0; }
-        InfoMundo m = g_crearNuevo ? crearMundo() : g_mundos[g_mundoElegido];
-        g_dir = m.carpeta; g_semilla = m.semilla; g_nombreMundo = m.nombre;
+        lanCerrar();
         g_capturado = true; g_primerMouse = true; g_pantalla = 1;
         glfwSetInputMode(ventana, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         if (glfwRawMouseMotionSupported()) glfwSetInputMode(ventana, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
@@ -3705,6 +4312,7 @@ static int juego_main() {
         g_survival = true; g_spawnOk = true; g_spawnS[0] = g_j.p.x; g_spawnS[1] = g_j.p.y; g_spawnS[2] = g_j.p.z; g_j.volar = false;
         if (std::atoi(sv) > 1) { g_vida = 13; g_inv[MADERA] = 60; g_inv[PIEDRA] = 30; g_inv[HIERRO] = 25; g_inv[ARENA] = 8; g_inv[CARBON] = 3; g_inv[PASTO] = 12; g_inv[HERR_BASE] = 1; g_inv[HERR_BASE + 5] = 1; g_barra[1] = HERR_BASE; g_barra[2] = PASTO; g_barra[3] = MADERA; g_barra[4] = HERR_BASE + 5; g_barra[0] = VACIO; aplicarSel(); }
     }
+    if (std::getenv("PRUEBA_OBJ")) { for (int id : {200, 201, 202, 203, 204, 205, 206, 242, 243, 244, 245, 246, 247, 248, 249, 254, 255}) g_inv[id] = 50; if (std::atoi(std::getenv("PRUEBA_OBJ")) > 1) g_pagina = std::atoi(std::getenv("PRUEBA_OBJ")) - 1; g_recPag = std::getenv("PRUEBA_REC") ? std::atoi(std::getenv("PRUEBA_REC")) : 0; }   // (pruebas) objetos nuevos
     if (const char* em = std::getenv("MATERIAL")) { g_barra[g_sel] = std::atoi(em); aplicarSel(); }   // (pruebas)
     std::printf("Carpeta del mundo: %s%s\n", g_dir.c_str(), jugadorCargado ? " (mundo anterior cargado)" : " (mundo nuevo)");
     double tGuardado = glfwGetTime(), tMensaje = -10, tAgua = 0;
@@ -3749,8 +4357,28 @@ static int juego_main() {
                 { std::error_code ec0; std::filesystem::create_directories(g_dir, ec0); }
                 g_modoLuna = true; cargando = true;
                 if (g_ck.activo) ckLunaTeleport();
-                else { g_j.p = {0.5, alturaLuna(0.0, 0.0) + 2.0, 0.5}; g_j.v = {0, 0, 0}; g_j.volar = false; g_vehCinematico = false; aviso("ESTAS EN LA LUNA (PRUEBA)"); }
+                else {
+                    g_j.p = {0.5, alturaLuna(0.0, 0.0) + 2.0, 0.5}; g_j.v = {0, 0, 0}; g_j.volar = false; g_vehCinematico = false; aviso("ESTAS EN LA LUNA (PRUEBA)");
+                    if (g_irBase) { irALaBase(0, 9, 1, 0, 0); g_irBase = false; }
+                    if (const char* lp = std::getenv("LUNA_POS")) {      // (pruebas) LUNA_POS=x,d,y,yaw,pitch: coordenadas locales de la base (d = hacia dentro)
+                        double a[5] = {0, -9, 1, 0, 0}; std::sscanf(lp, "%lf,%lf,%lf,%lf,%lf", &a[0], &a[1], &a[2], &a[3], &a[4]);
+                        g_j.p = {BASE_X + 0.5 + a[0], LUNA_Y0 + a[2] + 0.1, BASE_Z + 0.5 - a[1]}; g_j.yaw = a[3]; g_j.pitch = a[4]; g_j.volar = std::getenv("LUNA_VOLAR") != nullptr;
+                    }
+                }
             }
+        }
+        // ---- v71: salida de la Luna hacia el espacio (se vacian los chunks lunares y se vuelve al mundo de la Tierra)
+        if (g_tierraPend) {
+            g_tierraPend = false;
+            if (g_modoLuna && g_ck.activo && !g_dirTierra.empty()) {
+                guardarTodosLosSucios(); vehGuardar();
+                for (auto& kv : g_mapa) { Chunk& ch = *kv.second; ch.viva.store(false); std::lock_guard<std::mutex> lk(ch.mtx); ch.gOp.liberar(); ch.gAg.liberar(); ch.gLuz.liberar(); }
+                g_mapa.clear();
+                g_dir = g_dirTierra;
+                g_modoLuna = false; cargando = true;
+                if (g_lodOnAntes) g_lodOn = true;
+                ckEspacioTeleport();
+            } else g_ck.esperaLuna = false;
         }
         // ---- carga y descarga de chunks
         int pcx = divPiso((int)std::floor(g_j.p.x * SUB), CS), pcz = divPiso((int)std::floor(g_j.p.z * SUB), CS);
@@ -3821,6 +4449,7 @@ static int juego_main() {
             g_red.yo = {(float)g_j.p.x, (float)g_j.p.y, (float)g_j.p.z, (float)g_j.yaw, (float)g_j.pitch, (float)velS, (uint8_t)((g_j.volar ? 1 : 0) | (sent ? 2 : 0) | (g_golpea ? 4 : 0)), objetoEnMano()};
             g_red.horaLocal = (float)g_hora;
             g_red.paso(ahora);
+            if (g_red.host) lanAnunciar(ahora, g_nombreMundo, g_argPuerto, (int)g_red.rem.size() + 1);
             if (g_red.cli && g_red.horaRecibida >= 0) g_hora = g_red.horaRecibida;
             {   // avioneta compartida: la simula quien la pilota; si nadie, el anfitrion; los demas solo siguen su pose
                 static double tVeh = 0; static bool pilPrev = false;
@@ -3943,15 +4572,17 @@ static int juego_main() {
             }
         }
 
-        if (g_survival && !cargando) {                 // vida: se regenera sola y al morir reapareces
+        if ((g_survival || g_jefeAct()) && !cargando) {                 // vida: se regenera sola y al morir reapareces
             if (pil || g_sobreVeh) g_caidaMax = g_j.p.y;
             if (g_vida > 0 && g_vida < 20.0f) { g_vidaT += dt; if (g_vidaT > 4.0) { g_vida = std::min(20.0f, g_vida + 1.0f); g_vidaT = 0; } } else g_vidaT = 0;
             if (g_vida <= 0) {
-                g_j.p = {g_spawnS[0], g_spawnS[1] + 0.5, g_spawnS[2]}; g_j.v = {0, 0, 0}; g_j.inercia = {0, 0, 0};
+                if (g_survival) g_j.p = {g_spawnS[0], g_spawnS[1] + 0.5, g_spawnS[2]}; else if (g_pozoAbierto) g_j.p = {BASE_X - 22.5, LUNA_Y0 - 46.8, BASE_Z - 241.0}; else g_j.p = {BASE_X + 0.5, LUNA_Y0 - 15.8, BASE_Z - 196.0};
+                g_j.v = {0, 0, 0}; g_j.inercia = {0, 0, 0};
                 g_vida = 20.0f; g_caidaMax = g_j.p.y; g_vidaT = 0; g_protT = glfwGetTime() + 3.0;
                 g_aviso = "MORISTE: REAPARECES EN TU PUNTO"; g_avisoT = glfwGetTime();
             }
         }
+        if (!cargando) jefeTick(dt, ahora);
         // ---- camara
         V3 mira = {std::cos(g_j.pitch) * std::sin(g_j.yaw), std::sin(g_j.pitch), -std::cos(g_j.pitch) * std::cos(g_j.yaw)};
         V3 cam = {g_j.p.x, g_j.p.y + g_j.ojo, g_j.p.z};
@@ -3964,17 +4595,17 @@ static int juego_main() {
         glfwGetWindowSize(ventana, &g_winW, &g_winH);
         if (fbw < 1 || fbh < 1) { glfwSwapBuffers(ventana); continue; }
         float proy[16], vista[16], vp[16];
-        matPerspectiva(proy, 1.22f, (float)fbw / fbh, 0.05f, g_lodOn ? 1500.0f : 800.0f);
+        matPerspectiva(proy, 1.22f + (g_ck.activo && g_ck.fase == 2 && !g_modoLuna ? (float)std::min(0.50, std::sqrt(g_ck.V.x * g_ck.V.x + g_ck.V.y * g_ck.V.y + g_ck.V.z * g_ck.V.z) / 2500.0 * 0.50) : 0.0f), (float)fbw / fbh, 0.05f, g_lodOn ? 1500.0f : 800.0f);
         matVista(vista, mira, camUp);
         matMul(vp, proy, vista);
-        g_ckM.ok = g_ck.activo && g_ck.fase == 2 && !g_modoLuna;
+        g_ckM.ok = g_ck.activo && g_ck.fase == 2 && !g_modoLuna && !g_ck.reentrada;
         if (g_ckM.ok) {      // marcadores en pantalla: la Luna y hacia donde apunta la proa
-            V3 mr = ckLunaRel(cam);
+            V3 mr = g_ck.vuelta ? V3{g_terraX - cam.x, -CK_RP - cam.y, g_terraZ - cam.z} : ckLunaRel(cam);
             double dm = std::sqrt(mr.x * mr.x + mr.y * mr.y + mr.z * mr.z);
             V3 dM = mr * (1.0 / std::max(1.0, dm));
             V3 f_, r_, u_; vehBase(g_ck.e2, f_, r_, u_);
             g_ckM.ang = std::acos(std::max(-1.0, std::min(1.0, u_.x * dM.x + u_.y * dM.y + u_.z * dM.z)));
-            g_ckM.dist = dm - CK_LUNA_R;
+            g_ckM.dist = dm - (g_ck.vuelta ? CK_RP : CK_LUNA_R);
             auto proy2 = [&](V3 d, float& sx_, float& sy_) -> bool {
                 float px = (float)(d.x * 1000.0), py = (float)(d.y * 1000.0), pz = (float)(d.z * 1000.0);
                 float cx_ = vp[0] * px + vp[4] * py + vp[8] * pz + vp[12], cy_ = vp[1] * px + vp[5] * py + vp[9] * pz + vp[13], cw = vp[3] * px + vp[7] * py + vp[11] * pz + vp[15];
@@ -3992,6 +4623,13 @@ static int juego_main() {
             { V3 ps = norm(mr + ckSolEsp() * CK_LUNA_R); g_ckM.sDentro = proy2(ps, g_ckM.sx, g_ckM.sy); }      // el punto de la Luna donde el sol cae de frente
         }
 
+        if (g_modoLuna) {      // base lunar: puerta corrediza y teclado
+            puertaTick(ahora);
+            if (g_tecladoOn) {
+                double kx = BASE_X + 4.5 - g_j.p.x, kz = BASE_Z + 0.5 - g_j.p.z;
+                if (kx * kx + kz * kz > 49.0 || g_pausa || g_menu) g_tecladoOn = false;
+            }
+        }
         // ---- romper / poner
         Golpe golpe;
         if (!cargando && !pil) golpe = lanzarRayo(cam, norm(mira), 8.0);
@@ -4003,6 +4641,49 @@ static int juego_main() {
         if (g_pedirH) { g_pedirH = false; if (g_veh.activo && !g_veh.pilotando) { vehDesarmar(); g_guardarYa = true; } }
         double cdAcc = 0.18;
         if (g_survival && izq && golpe.hay) cdAcc = survCooldown(leerCubito(golpe.x, golpe.y, golpe.z), g_material);
+        static double tMelee = -10;
+        if (izq && g_material == ID_ARCO && !g_menu && (!g_survival || g_inv[ID_ARCO] > 0)) {   // v82: arco y flechas
+            static double tArco = -10;
+            if (ahora - tArco > 0.7) {
+                tArco = ahora;
+                if (!g_modoLuna) aviso("POR AHORA EL ARCO SOLO SE VE VOLAR EN LA LUNA");
+                else if (g_survival && g_inv[ID_FLECHA] <= 0) aviso("NO TIENES FLECHAS (RECETAS)");
+                else { if (g_survival) g_inv[ID_FLECHA]--; flechaDisparar(cam, norm(mira), ahora); }
+            }
+        } else
+        if (izq && esArma(g_material) && !g_menu && (!g_survival || g_inv[g_material] > 0)) {   // v81: armas cuerpo a cuerpo (contra el mecha de la Luna)
+            const ArmaInfo ai = armaInfo(g_material);
+            if (ahora - tMelee > ai.cd) {
+                tMelee = ahora;
+                if ((g_material == ID_ESPADAP || g_material == ID_MARTILLO) && g_survival && g_inv[0] == 0) { /* bloqueadas */ }
+                else if (g_modoLuna && g_mecha.viva && !g_mecha.muriendo) {
+                    const double mx = g_mecha.x - g_j.p.x, mz = g_mecha.z - g_j.p.z, dh = std::sqrt(mx * mx + mz * mz);
+                    V3 dm = norm(mira); const double fr = dh > 1e-3 ? (dm.x * mx + dm.z * mz) / dh : 1.0;
+                    if (dh < ai.alcance + 2.4 && fr > 0.25) {
+                        mechaDano(ai.dano, ahora);
+                        if (g_material == ID_MARTILLO) g_booms.push_back({g_mecha.x, g_mecha.y + 1.0, g_mecha.z, ahora});
+                    }
+                }
+            }
+        } else
+        if (der && g_material == ID_KITCOH && !g_menu && ahora - tAccion > 0.8 && (!g_survival || g_inv[ID_KITCOH] > 0)) {   // el kit se usa con clic derecho: arma el cohete
+            tAccion = ahora;
+            if (g_ck.activo) aviso("YA TIENES UN COHETE ARMADO");
+            else { if (g_survival) g_inv[ID_KITCOH]--; g_pedirCohete = true; aviso("ARMANDO EL COHETE..."); }
+        } else
+        if (izq && g_material == ID_PISTOLA && g_modoLuna && !g_menu) {
+            pistolaDisparar(cam, norm(mira), ahora);          // pistola de plasma (v67)
+        } else
+        if (golpe.hay && der && g_modoLuna && ahora - tAccion > 0.4 && leerCubito(golpe.x, golpe.y, golpe.z) == BASE_BOTON) {
+            tAccion = ahora;                      // boton de la computadora: enciende la IA
+            if (jefeCercaCohete()) jefeAbordar(ahora); else if (g_iaOn) aviso("LA IA YA ESTA ACTIVADA"); else jefeActivarIA(ahora);
+        } else
+        if (golpe.hay && der && g_modoLuna && ahora - tAccion > 0.4 && leerCubito(golpe.x, golpe.y, golpe.z) == BASE_TECLADO) {
+            tAccion = ahora;                      // clic derecho sobre el teclado de la puerta
+            if (!g_puertaAbierta && puertaAbiertaReal()) { g_puertaAbierta = true; g_baseDig = 4; }
+            if (g_puertaAbierta || g_puertaT0 >= 0) aviso("LA PUERTA YA ESTA ABIERTA");
+            else { g_tecladoOn = true; aviso("ESCRIBE EL CODIGO CON LAS TECLAS 0-9 (ESC: CERRAR)"); }
+        } else
         if (golpe.hay && (izq || der) && g_material == ANTORCHA && (!g_survival || g_inv[ANTORCHA] > 0) && esTnt(leerCubito(golpe.x, golpe.y, golpe.z)) && ahora - tAccion > 0.4) {
             tAccion = ahora;                      // antorcha + clic sobre TNT = encender (no rompe ni pone nada)
             tntEncender(golpe.x, golpe.y, golpe.z, ahora, 3.0);
@@ -4045,7 +4726,7 @@ static int juego_main() {
                         escribirCubito(x, y, z, RUEDA, sucios);
                     }
                 }
-            } else if (esHerr(g_material) || g_material < 0 || g_material == ID_POLVORA) {
+            } else if (esObjNuevo(g_material) || esHerr(g_material) || g_material < 0 || g_material == ID_POLVORA || g_material == ID_RADAR || g_material == ID_PISTOLA) {
                 // las herramientas y la mano vacia no ponen nada
             } else {
                 int x0, y0, z0, n;
@@ -4089,7 +4770,7 @@ static int juego_main() {
         }
         if (std::getenv("DBGINV") && frame % 5 == 0) std::printf("INV cm=%.1f vy=%.1f suelo=%d dt=%.4f f=%d arena=%d tierra=%d pasto=%d piedra=%d pico_p=%d vida=%.1f y=%.1f\n", g_caidaMax, g_j.v.y, (int)g_j.suelo, dt, frame, g_inv[ARENA], g_inv[TIERRA], g_inv[PASTO], g_inv[PIEDRA], g_inv[HERR_BASE + 1], g_vida, g_j.p.y);
         if (const char* fc2 = std::getenv("CAIDA")) if (frame == std::atoi(fc2)) g_j.p.y += 14;   // (pruebas) soltarte desde 14 bloques
-        if (const char* pm = std::getenv("PRUEBA_MENU")) if (frame == 40) { abrirMenu(ventana); g_menuPag = std::atoi(pm); menuReconstruir(); }   // (pruebas) abre el menu en esa pagina
+        if (const char* pm = std::getenv("PRUEBA_MENU")) if (frame == 40) { abrirMenu(ventana); g_menuPag = std::atoi(pm); if (std::getenv("PRUEBA_OBJ") && std::atoi(std::getenv("PRUEBA_OBJ")) > 1) g_pagina = 1; menuReconstruir(); }   // (pruebas) abre el menu en esa pagina
         if (const char* pt = std::getenv("PRUEBA_TNT")) if (frame == std::atoi(pt)) {   // (pruebas) cubo de TNT delante, encendido a 1 s
             std::vector<ChunkP> su;
             int bx = (int)std::floor((g_j.p.x + std::sin(g_j.yaw) * 7.0) * SUB), bz = (int)std::floor((g_j.p.z - std::cos(g_j.yaw) * 7.0) * SUB);
@@ -4473,12 +5154,21 @@ static int juego_main() {
         glFrontFace(GL_CCW);
         glEnable(GL_MULTISAMPLE);
 
-        if (g_lodOn) {   // ---- mundo lejano: se dibuja primero con su propia proyeccion y luego se borra la profundidad
+        {   // v75: horizonte real: muy alto el suelo de abajo tambien se dibuja simple
+            const bool espacio = g_ck.activo && g_ck.fase == 2 && g_terraFija;
+            if (!g_horReal || !g_lodOn || g_modoLuna || espacio) g_altoLod = false;
+            else if (!g_altoLod && cam.y > 420.0) g_altoLod = true;
+            else if (g_altoLod && cam.y < 340.0) g_altoLod = false;
+            g_lodRin0 = g_altoLod ? 0.0 : 100.0;
+            if (espacio && !g_lod.empty()) lodLiberarTodo();   // v77: en orbita el planeta es solo la textura fija (el dibujo lejano ya no te sigue)
+            g_lodEsp = espacio;
+        }
+        if (g_lodOn && !g_lodEsp) {   // ---- mundo lejano: se dibuja primero con su propia proyeccion y luego se borra la profundidad
             for (auto& kv : g_lod) if (kv.second->estado.load(std::memory_order_acquire) == 1) { lodSubir(*kv.second); break; }
             lodReemplazar();
             if (frame % 6 == 0) { lodProcesarRegen(); lodActualizar(cam.x, cam.z); }
             float projL[16], vpL[16], plL[6][4];
-            matPerspectiva(projL, 1.22f, (float)fbw / fbh, 1.5f, 6000.0f);
+            matPerspectiva(projL, 1.22f, (float)fbw / fbh, 1.5f, 30000.0f);
             matMul(vpL, projL, vista);
             planosFrustum(vpL, plL);
             glUseProgram(progLod);
@@ -4487,6 +5177,14 @@ static int juego_main() {
             glUniform1f(glGetUniformLocation(progLod, "uFogA"), aguaFogA > 0 ? aguaFogA : (float)(LOD_FOG_MAX * 0.55));
             glUniform1f(glGetUniformLocation(progLod, "uFogB"), aguaFogB > 0 ? aguaFogB : (float)(LOD_FOG_MAX * 0.97));
             glUniform1f(glGetUniformLocation(progLod, "uSkyMul"), skyMul);
+            {   // v76: horizonte real: curvatura segun la altura, sin niebla desde el espacio y borde redondo
+                const float kAlt = g_horReal ? (float)std::min(1.0, std::max(0.0, (cam.y - 200.0) / 1000.0)) : 0.0f;
+                g_lodCurv = kAlt * kAlt * (3.0f - 2.0f * kAlt);
+                if (const char* ec_ = std::getenv("LODCURV")) g_lodCurv = (float)std::atof(ec_);
+                glUniform1f(glGetUniformLocation(progLod, "uCurv"), g_lodCurv);
+                glUniform1f(glGetUniformLocation(progLod, "uFogK"), g_horReal ? 1.0f - (float)std::min(1.0, std::max(0.0, (cam.y - 600.0) / 2000.0)) : 1.0f);
+                glUniform1f(glGetUniformLocation(progLod, "uEdge"), g_horReal ? (float)lodFogMax() : 1e9f);
+            }
             GLint lRel = glGetUniformLocation(progLod, "uRel"), lAlfa = glGetUniformLocation(progLod, "uAlpha");
             std::vector<LodTile*> vis;
             for (auto& kv : g_lod) {
@@ -4495,8 +5193,14 @@ static int juego_main() {
                 if (!lodNecesario(t->niv, t->tx, t->tz, cam.x, cam.z, 0.0)) continue;
                 double ts = (double)LOD_N * LOD_CELDA[t->niv];
                 double mnx = t->tx * ts - cam.x, mny = -cam.y, mnz = t->tz * ts - cam.z, hy = 100.0;
+                if (g_lodCurv > 0.0f) {   // la curvatura baja el terreno lejano: se amplia la caja para no recortarlo de mas
+                    double hm = std::sqrt(std::max(mnx * mnx, (mnx + ts) * (mnx + ts)) + std::max(mnz * mnz, (mnz + ts) * (mnz + ts)));
+                    hm = std::min(hm, 5880.0);
+                    double drop = g_lodCurv * (6000.0 - std::sqrt(36000000.0 - hm * hm));
+                    mny -= drop; hy += drop;
+                }
                 bool fuera = false;
-                for (int k = 0; k < 6 && !fuera; k++) {
+                for (int k = 0; k < 6 && !fuera && g_lodCurv < 0.3f; k++) {   // con curvatura fuerte no se recorta (la caja plana ya no sirve)
                     float qx = plL[k][0] > 0 ? (float)(mnx + ts) : (float)mnx;
                     float qy = plL[k][1] > 0 ? (float)(mny + hy) : (float)mny;
                     float qz = plL[k][2] > 0 ? (float)(mnz + ts) : (float)mnz;
@@ -4632,6 +5336,7 @@ static int juego_main() {
             Chunk* c = kv.second.get();
             if (c->state.load(std::memory_order_acquire) == ST_GEN) continue;     // se sigue dibujando la malla anterior mientras se rehace
             if (!c->gOp.n && !c->gAg.n) continue;
+            if (g_altoLod && !g_ancla.count(colKey(c->cx, c->cz)) && !g_requeridos.count(colKey(c->cx, c->cz))) continue;   // v75: desde muy alto lo de abajo es mundo lejano
             if (g_conservar) {      // chunks conservados fuera del radio: no se dibujan (de eso se encarga el mundo lejano)
                 int ex = c->cx - pcx, ez = c->cz - pcz;
                 if (ex * ex + ez * ez > (RC + 3) * (RC + 3) && !g_requeridos.count(colKey(c->cx, c->cz)) && !g_redCols.count(colKey(c->cx, c->cz))) continue;
@@ -4724,6 +5429,7 @@ static int juego_main() {
         vehDibujar(vp, cam, solV, solF, skyMul, gfx ? 1.0f : 0.0f, cielo, fogAv, fogBv, false);
         ckDibujar(vp, cam, solV, solF, skyMul, gfx ? 1.0f : 0.0f, cielo, fogAv, fogBv, false);
         jugDibujar(vp, cam.x, cam.y, cam.z, solV, solF, skyMul, cielo, fogAv, fogBv);
+        if (g_modoLuna) jefeDibujar(vp, cam.x, cam.y, cam.z, solV, solF, jefeSkyMul(skyMul), cielo, fogAv, fogBv, ahora);
         g_etiquetas.clear();
         for (auto& kv : g_red.rem) if (kv.second.visto) {       // nombres sobre la cabeza
             const Remoto& m = kv.second;
@@ -5000,16 +5706,37 @@ static int juego_main() {
     std::printf("Al salir: %d chunks guardados | cargados desde disco en esta sesion: %d\n", nFin, g_cargadosDisco.load());
     g_pool.detener();
     glfwTerminate();
-    return 0;
+    return g_volverMenu ? 2 : 0;
 }
+
+// "guardar y salir": se vuelve a abrir el juego (sin argumentos) y arranca en el menu de inicio
+#ifndef ANDROID_GAME
+static void reiniciarEnMenu(const char* exe) {
+    std::fflush(stdout);
+#ifdef _WIN32
+    _putenv("MUNDO="); _putenv("RED_UNIR="); _putenv("RED_HOST=");
+    _execl(exe, exe, (char*)nullptr);
+#else
+    unsetenv("MUNDO"); unsetenv("RED_UNIR"); unsetenv("RED_HOST");
+    execl("/proc/self/exe", exe, (char*)nullptr);
+#endif
+}
+#endif
 
 #ifdef ANDROID_GAME
 void android_main(struct android_app* app) {       // punto de entrada en Android (NativeActivity)
     A_app = app;
     if (app->activity && app->activity->internalDataPath) { if (chdir(app->activity->internalDataPath) != 0) A_log("chdir fallo"); }   // aqui se guardan mundos y opciones
-    juego_main();
+    int r = juego_main();
+    if (r == 2) A_relanzar();       // "guardar y salir": se vuelve a abrir la app en el menu de inicio
     ANativeActivity_finish(app->activity);
+    if (r == 2) { usleep(500000); _exit(0); }   // el proceso nuevo arranca con todo limpio
 }
 #else
-int main(int argc, char** argv) { leerArgs(argc, argv); return juego_main(); }
+int main(int argc, char** argv) {
+    leerArgs(argc, argv);
+    int r = juego_main();
+    if (r == 2) reiniciarEnMenu(argv[0]);
+    return r == 2 ? 0 : r;
+}
 #endif

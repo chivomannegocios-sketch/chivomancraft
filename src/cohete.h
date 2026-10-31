@@ -137,7 +137,24 @@ struct Cohete {
     bool desc = false, esperaLuna = false, enLuna = false;   // v59: descenso, esperando cargar la Luna, ya en el mundo lunar
     double tLleg = -1;
     std::vector<std::array<int, 3>> muestras;                 // celdas de la nave para detectar el choque
+    // v71: cohete de bloques de la base lunar (vuelo manual desde la plataforma)
+    bool bloques = false, pad = false;                       // es el cohete de la base / aun esta sobre su plataforma
+    bool vuelta = false, reentrada = false;                   // v71: de regreso a la Tierra (en el espacio) / entrando en su atmosfera
+    double calor = 0, gasto = 1.5;
+    double altMax = 0;                                        // v80: altura maxima alcanzada (para saber si vuelves del espacio)
+    int autop = 0;                                            // v80: piloto automatico de la bajada (1 = cohete clasico: aterrizaje de emergencia, 2 = moderno: aterrizaje vertical)
+    bool holdCarga = false;                                   // v79: esperando chunks bajo la nave en el descenso
+    bool espCarga = false; V3 Vh{0, 0, 0};                    // v71f: esperando a que cargue el mundo bajo la nave al entrar a la Tierra
+    double flamaY = CK_SPLIT - CK_O2 - 1.5, camY = CK_FLOOR + 3 - CK_O2, camD = 42.0, empuje = 60.0, padY = 0, techo = 1e9;
 };
+struct CohOrig { int x, y, z; uint8_t t; };
+static std::vector<CohOrig> g_cohOrig;                       // celdas originales del cohete de la base (para volver a ponerlas si bajas en la plataforma)
+static V3 g_cohJug{0, 0, 0};
+static bool g_cohLanzado = false;
+static V3 g_lanzP{0, 0, 0};                                   // v80: punto de despegue (x, y del suelo/plataforma, z)
+static bool g_lanzOk = false;
+static bool g_tierraPend = false;      // v71: pide salir del mundo lunar hacia el espacio (lo hace el bucle principal)
+static const double CK_TIERRA_G = 16.0;
 static Cohete g_ck;
 static bool g_pedirLanzar = false;
 static bool g_lunaPend = false;      // v59: pide cambiar al mundo de la Luna (lo hace el bucle principal)
@@ -223,6 +240,7 @@ static void ckLiberar() {
     k.flama.liberar(); k.fx.liberar();
     k.humo.clear();
     k.activo = false; k.e1vivo = false; k.quema = false; g_terraFija = false; g_ckM.ok = false;
+    k.bloques = false; k.pad = false; k.vuelta = false; k.reentrada = false; k.espCarga = false; k.autop = 0; k.altMax = 0; k.calor = 0; k.gasto = 1.5; g_cohOrig.clear(); g_tierraPend = false;
 }
 
 // mundo <-> celdas del cohete construido
@@ -261,7 +279,7 @@ static bool ckLanzar() {
         else k.e2.celdas.push_back({c.x, c.y - CK_O2, c.z, c.t});
     }
     g_redEnviar = prev;
-    for (auto& c : su) remallarYa(c);
+    for (auto& c : su) remallarAsync(c);
     marcarLuzSucia(ex0 - 1, ex1 + 1, ey0 - 1, ey1 + 1, ez0 - 1, ez1 + 1, su);
     k.yaw = std::atan2((double)fx, (double)-fz);
     k.pitch = 0;
@@ -288,7 +306,23 @@ static bool ckLanzar() {
 static void ckSalir() {       // vuelves a la plataforma; el cohete se pierde
     Cohete& k = g_ck;
     if (!k.activo) return;
-    if (k.llegada || g_modoLuna) { aviso("NO PUEDES SALIR EN PLENO VUELO: ATERRIZA"); return; }
+    if (k.bloques && k.pad) {            // v71: aun en la plataforma: el cohete vuelve a ser de bloques y bajas a la cabina
+        std::vector<ChunkP> su;
+        const bool prev = g_redEnviar; g_redEnviar = false;
+        int ex0 = 1 << 30, ex1 = -(1 << 30), ey0 = 1 << 30, ey1 = -(1 << 30), ez0 = 1 << 30, ez1 = -(1 << 30);
+        for (auto& c : g_cohOrig) {
+            escribirCubito(c.x, c.y, c.z, c.t, su);
+            ex0 = std::min(ex0, c.x); ex1 = std::max(ex1, c.x); ey0 = std::min(ey0, c.y); ey1 = std::max(ey1, c.y); ez0 = std::min(ez0, c.z); ez1 = std::max(ez1, c.z);
+        }
+        g_redEnviar = prev;
+        for (auto& c : su) remallarAsync(c);
+        marcarLuzSucia(ex0 - 1, ex1 + 1, ey0 - 1, ey1 + 1, ez0 - 1, ez1 + 1, su);
+        ckLiberar();
+        g_j.p = g_cohJug; g_j.v = {0, 0, 0}; g_j.inercia = {0, 0, 0}; g_j.volar = false; g_j.pitch = 0; g_sobreVeh = false;
+        aviso("BAJASTE DEL COHETE");
+        return;
+    }
+    if (k.llegada || g_modoLuna || k.vuelta || k.reentrada) { aviso("NO PUEDES SALIR EN PLENO VUELO: ATERRIZA"); return; }
     const CohInfo I = g_cohInfo;
     ckLiberar();
     g_jRespOk = false;
@@ -345,6 +379,61 @@ static void ckLunaTeleport() {
     for (size_t i = 0; i < N; i += paso) k.muestras.push_back({e.celdas[i].x, e.celdas[i].y, e.celdas[i].z});
     k.enLuna = true; k.esperaLuna = false;
     g_j.p = e.p;
+}
+
+// v71: sales de la Luna: el mundo ya es el de la Tierra; la nave aparece sobre la Luna con la Tierra a la vista (inverso de ckLunaTeleport)
+static void ckEspacioTeleport() {
+    Cohete& k = g_ck; Veh& e = k.e2;
+    if (g_terraX == 0.0 && g_terraZ == 0.0 && g_jRespOk) { g_terraX = g_jResp[0]; g_terraZ = g_jResp[2]; }
+    g_terraFija = true;
+    const V3 mE = ckLunaE();
+    const V3 E = norm(mE) * -1.0;                       // de la Luna hacia la Tierra
+    const double phi = std::acos(std::max(-1.0, std::min(1.0, g_tierraM.y / std::sqrt(ckDot(g_tierraM, g_tierraM)))));
+    V3 ref = std::fabs(E.y) > 0.97 ? V3{1, 0, 0} : V3{0, 1, 0};
+    V3 p1 = norm(cruz(ref, E));
+    V3 gy = E * std::cos(phi) + p1 * std::sin(phi);
+    V3 gh = norm(E - gy * ckDot(E, gy)); V3 g3 = cruz(gh, gy);
+    V3 lh = norm(V3{g_tierraM.x, 0, g_tierraM.z}); V3 l3 = cruz(lh, V3{0, 1, 0});
+    auto Mp = [&](V3 v) { return gh * ckDot(v, lh) + gy * v.y + g3 * ckDot(v, l3); };
+    double alt = std::max(40.0, std::min(200.0, e.p.y - alturaLuna(e.p.x, e.p.z)));
+    e.bf = Mp(e.bf); e.br = Mp(e.br); e.bu = Mp(e.bu); ckOrto(e);
+    k.V = Mp(k.V);
+    const V3 ec = {g_terraX, -CK_RP, g_terraZ};
+    e.p = ec + mE + gy * (CK_LUNA_R + alt);
+    k.muestras.clear();
+    k.enLuna = false; k.esperaLuna = false; k.pad = false; k.vuelta = true; k.reentrada = false; k.llegada = false; k.desc = false;
+    k.empuje = 60.0; k.gasto = 0.8; k.fuel = 100.0; k.techo = 1e9; k.camD = 70.0; k.cab = false;
+    g_j.p = e.p;
+    g_j.yaw = std::atan2(-gy.x, gy.z) + 3.14159265; g_j.pitch = 0.12;
+    aviso("EN EL ESPACIO! LA TIERRA ESTA ATRAS: GIRA (W/S A/D Q/E), 2 = MOTOR, SHIFT+2 = IMPULSO DE SALTO");
+}
+// v71: llegas a la atmosfera de la Tierra: se pasa del espacio esferico al mundo plano (arriba = +Y), con rozamiento y calor
+static void ckTierraTeleport() {
+    Cohete& k = g_ck; Veh& e = k.e2;
+    const V3 ec = {g_terraX, -CK_RP, g_terraZ};
+    V3 er = e.p - ec; const double dE = std::sqrt(ckDot(er, er));
+    V3 up = er * (1.0 / std::max(1.0, dE));
+    const double th = std::acos(std::max(-1.0, std::min(1.0, up.y)));
+    V3 hz = V3{up.x, 0, up.z}; const double hl = std::sqrt(hz.x * hz.x + hz.z * hz.z);
+    hz = hl > 1e-6 ? hz * (1.0 / hl) : V3{1, 0, 0};
+    V3 ref = std::fabs(up.y) > 0.97 ? V3{1, 0, 0} : V3{0, 1, 0};
+    V3 t1 = norm(cruz(ref, up)), t2 = cruz(t1, up);
+    auto M = [&](V3 v) { return V3{ckDot(v, t1), ckDot(v, up), ckDot(v, t2)}; };
+    e.bf = M(e.bf); e.br = M(e.br); e.bu = M(e.bu); ckOrto(e);
+    k.V = M(k.V);
+    const double alt = 1000.0;
+    const double lat = CK_RP * th;
+    e.p = {g_terraX + hz.x * lat, alt, g_terraZ + hz.z * lat};
+    g_lanzP = {g_terraX + 40.0, 0.0, g_terraZ}; g_lanzOk = true;   // v80: aterrizaje junto al punto de despegue de la Tierra (sin pisar tus construcciones)
+    e.p = {g_lanzP.x, alt, g_lanzP.z};
+    k.autop = 0;
+    g_terraFija = false; k.vuelta = false; k.reentrada = true; k.empuje = 36.0;
+    k.espCarga = true; k.Vh = k.V; k.V = {0, 0, 0};
+    k.muestras.clear();
+    const size_t N = e.celdas.size(), paso = std::max<size_t>(1, N / 2500);
+    for (size_t i = 0; i < N; i += paso) k.muestras.push_back({e.celdas[i].x, e.celdas[i].y, e.celdas[i].z});
+    g_j.p = e.p;
+    aviso("A 1000 BLOQUES DE LA TIERRA: CARGANDO EL MUNDO...");
 }
 
 static bool ckChoque(Cohete& k) {
@@ -406,7 +495,7 @@ static void ckAterrizaje() {
         ex0 = std::min(ex0, p.x); ex1 = std::max(ex1, p.x); ey0 = std::min(ey0, p.y); ey1 = std::max(ey1, p.y); ez0 = std::min(ez0, p.z); ez1 = std::max(ez1, p.z);
     }
     g_redEnviar = prev;
-    for (auto& c : su) remallarYa(c);
+    for (auto& c : su) remallarAsync(c);
     marcarLuzSucia(ex0 - 1, ex1 + 1, ey0 - 1, ey1 + 1, ez0 - 1, ez1 + 1, su);
     // el jugador queda de pie junto a los restos, mirandolos
     int mx = 0, mz = 0; { long sx = 0, sz = 0; for (auto& p : cs) { sx += p.x; sz += p.z; } mx = (int)(sx / (long)cs.size()); mz = (int)(sz / (long)cs.size()); }
@@ -415,7 +504,7 @@ static void ckAterrizaje() {
     const int px = mx + medio + 12 * SUB, pz = mz;
     g_j.p = {(px + 0.5) * VS, (gtop(px, pz) + 1) * VS + 0.05, (pz + 0.5) * VS};
     g_j.v = {0, 0, 0}; g_j.inercia = {0, 0, 0}; g_j.volar = false; g_j.pitch = 0.05; g_j.yaw = -1.5708; g_sobreVeh = false;
-    char b[160]; std::snprintf(b, sizeof b, "ATERRIZAJE DE EMERGENCIA! IMPACTO A %d KM/H - LA NAVE SE DESARMO EN BLOQUES", (int)(spd * 3.6));
+    char b[160]; if (spd < 8.0) std::snprintf(b, sizeof b, "ATERRIZASTE SUAVEMENTE: LA NAVE QUEDO EN PIE (AHORA ES DE BLOQUES)"); else std::snprintf(b, sizeof b, "ATERRIZAJE DE EMERGENCIA! IMPACTO A %d KM/H - LA NAVE SE DESARMO EN BLOQUES", (int)(spd * 3.6));
     aviso(b);
 }
 
@@ -469,6 +558,7 @@ static void ckPaso1(GLFWwindow* w, double dt) {
         const double VEL = 0.55;
         V3 pedido = {((Kd(GLFW_KEY_W) ? 1 : 0) - (Kd(GLFW_KEY_S) ? 1 : 0)) * VEL, ((Kd(GLFW_KEY_D) ? 1 : 0) - (Kd(GLFW_KEY_A) ? 1 : 0)) * VEL,
                      ((Kd(GLFW_KEY_E) ? 1 : 0) - (Kd(GLFW_KEY_Q) ? 1 : 0)) * VEL};
+        if (k.pad || k.autop) pedido = {0, 0, 0};          // sobre la plataforma (o con piloto automatico) no se puede girar
         if (const char* tg = std::getenv("CK_GIRO")) { double a_, b_, c_; if (std::sscanf(tg, "%lf,%lf,%lf", &a_, &b_, &c_) == 3) pedido = {a_ * VEL, b_ * VEL, c_ * VEL}; }   // (pruebas)
         double q = std::min(1.0, 3.0 * dt);
         k.w = k.w + (pedido - k.w) * q;
@@ -491,14 +581,64 @@ static void ckPaso1(GLFWwindow* w, double dt) {
                 V3 u = e.bu;
                 double vu = k.V.x * u.x + k.V.y * u.y + k.V.z * u.z;
                 V3 perp = k.V - u * vu;
-                k.V = u * (vu + 60.0 * dt) + perp * std::exp(-0.6 * dt);
-                k.fuel = std::max(0.0, k.fuel - 1.5 * dt);
+                const double imp = (k.bloques && k.vuelta && Kd(GLFW_KEY_LEFT_SHIFT)) ? 4.0 : 1.0;      // v71: SHIFT = impulso de salto (solo en el espacio)
+                k.V = u * (vu + k.empuje * imp * dt) + perp * std::exp(-0.6 * dt);
+                k.fuel = std::max(0.0, k.fuel - k.gasto * (imp > 1.0 ? 2.0 : 1.0) * dt);
             }
             if (k.esperaLuna) { /* esperando a que cargue la Luna */ }
             else if (g_modoLuna) {                   // ---- ya en el mundo lunar: gravedad hacia abajo y choque con el suelo
-                k.V.y -= CK_LUNA_G * dt;
+                if (k.pad) {                         // v71: sobre la plataforma: quieto hasta que enciendas el motor
+                    if (!k.quema) k.V = {0, 0, 0};
+                    else if (e.p.y > k.padY + 2.0) k.pad = false;
+                } else k.V.y -= CK_LUNA_G * dt;
+            } else if (k.reentrada && k.espCarga) {   // v71f: se espera a que carguen los chunks bajo la nave y luego empieza el descenso
+                bool kn = true;
+                leerCubito((int)std::floor(e.p.x * SUB), 40 * SUB, (int)std::floor(e.p.z * SUB), &kn);
+                k.V = {0, 0, 0};
+                if (kn) {
+                    const double v0 = std::sqrt(ckDot(k.Vh, k.Vh));
+                    k.V = k.Vh * (v0 > 150.0 ? 150.0 / v0 : 1.0); k.espCarga = false;
+                    aviso("DESCENDIENDO: MANIOBRA (W/S A/D Q/E) Y FRENA CON 2 ANTES DE TOCAR EL SUELO");
+                }
+            } else if (k.reentrada) {                // ---- v71: atmosfera de la Tierra: gravedad, rozamiento y calor
+                {   // v79: si el suelo bajo la nave aun no esta cargado (los chunks no cargados no chocan), la nave espera quieta: asi nunca atraviesa el terreno
+                    bool todoCargado = true;
+                    static const int OX[5] = {0, 14, -14, 0, 0}, OZ[5] = {0, 0, 0, 14, -14};
+                    for (int q = 0; q < 5 && todoCargado; q++) {
+                        const double px = e.p.x + OX[q], pz = e.p.z + OZ[q];
+                        const double gy = alturaTerreno(px, pz);
+                        if (e.p.y - gy > 700.0) continue;           // aun muy alto: nada que comprobar
+                        const int X = (int)std::floor(px * SUB), Z = (int)std::floor(pz * SUB);
+                        bool k1 = true, k2 = true;
+                        leerCubito(X, (int)std::floor(gy * SUB), Z, &k1);                                     // el suelo
+                        leerCubito(X, (int)std::floor(std::max(gy, e.p.y - 60.0) * SUB), Z, &k2);             // y 60 bloques bajo la nave
+                        if (!k1 || !k2) todoCargado = false;
+                    }
+                    if (!todoCargado) {
+                        k.V = {0, 0, 0};
+                        k.holdCarga = true;
+                    } else k.holdCarga = false;
+                }
+                if (!k.holdCarga) k.V.y -= CK_TIERRA_G * dt;
+                const double vv = std::sqrt(ckDot(k.V, k.V));
+                k.V = k.V * std::exp(-0.12 * dt);
+                if (vv > 120.0) k.V = k.V * std::exp(-1.4 * dt * std::min(1.0, (vv - 120.0) / 300.0));
+                k.calor = std::max(0.0, std::min(1.0, (vv - 130.0) / 350.0));
             } else {
-            if (g_terraFija && !k.llegada) {            // la Luna atrae un poco y al llegar la nave se frena
+            if (k.vuelta) {                          // v71: rumbo a la Tierra
+                const V3 ec = {g_terraX, -CK_RP, g_terraZ};
+                V3 er = ec - e.p; const double dE = std::sqrt(ckDot(er, er));
+                if (dE < 4.5 * CK_RP) k.V = k.V + er * (28.0 * CK_RP * CK_RP / (dE * dE * dE) * dt);
+                if (dE - CK_RP < 1200.0) { ckTierraTeleport(); return; }
+            }
+            if (g_terraFija && !k.vuelta && !k.llegada && !g_modoLuna) {   // v80: el cohete clasico tambien puede volver a la Tierra (antes la atravesaba)
+                const V3 ec = {g_terraX, -CK_RP, g_terraZ};
+                V3 er = ec - e.p; const double dE = std::sqrt(ckDot(er, er));
+                k.altMax = std::max(k.altMax, dE - CK_RP);
+                if (k.altMax > 2500.0 && dE - CK_RP < 1500.0 && ckDot(k.V, er) > 0.0) { ckTierraTeleport(); return; }
+                if (k.altMax > 2500.0 && dE < 4.5 * CK_RP) k.V = k.V + er * (28.0 * CK_RP * CK_RP / (dE * dE * dE) * dt);   // la Tierra atrae
+            }
+            if (g_terraFija && !k.llegada && !k.vuelta) {            // la Luna atrae un poco y al llegar la nave se frena
                 V3 mr = ckLunaRel(e.p);
                 double dist = std::sqrt(mr.x * mr.x + mr.y * mr.y + mr.z * mr.z);
                 if (dist < 12.0 * CK_LUNA_R) {
@@ -543,8 +683,64 @@ static void ckPaso1(GLFWwindow* w, double dt) {
             }
             }
         }
+        if (k.reentrada && !k.espCarga && g_lanzOk && !g_modoLuna) {   // v80: piloto automatico de la bajada (a 500 bloques sobre el punto de despegue)
+            // suelo real bajo la nave (con tus construcciones): primer cubito solido hacia abajo
+            double gy = 0.0;
+            {
+                const int X = (int)std::floor(e.p.x * SUB), Z = (int)std::floor(e.p.z * SUB);
+                int y = std::min((int)std::floor((e.p.y + 2.0) * SUB), HYC * CS - 1), n = 0; bool kn = true;
+                for (; y > 0 && n < 1400; y--, n++) { uint8_t t = leerCubito(X, y, Z, &kn); if (!kn) { y = (int)std::floor(alturaTerreno(e.p.x, e.p.z) * SUB); break; } if (esSolido(t)) break; }
+                gy = (double)(y + 1) / SUB;
+            }
+            double lowY = 1e18;
+            { V3 f_, r_, u_; vehBase(e, f_, r_, u_); for (auto& m : k.muestras) { double wy = e.p.y + r_.y * ((m[0] + 0.5) * VS) + u_.y * ((m[1] + 0.5) * VS) + f_.y * ((m[2] + 0.5) * VS); lowY = std::min(lowY, wy); } }
+            const double h = (k.muestras.empty() ? e.p.y : lowY) - gy;     // altura libre de la parte mas baja de la nave sobre el suelo
+            if (!k.autop && h < 500.0) {
+                k.autop = k.bloques ? 2 : 1;
+                aviso(k.autop == 2 ? "PILOTO AUTOMATICO: ATERRIZAJE VERTICAL" : "PILOTO AUTOMATICO: SIN COMBUSTIBLE - ATERRIZAJE DE EMERGENCIA!");
+            }
+            if (k.autop) {
+                auto alinear = [&](V3 tu, double rate) {              // gira la nave para que su eje u apunte hacia tu
+                    double c = std::max(-1.0, std::min(1.0, ckDot(e.bu, tu)));
+                    double ang = std::acos(c);
+                    if (ang < 1e-4) return;
+                    V3 ax = cruz(e.bu, tu); double al = std::sqrt(ckDot(ax, ax));
+                    if (al < 1e-6) ax = e.br; else ax = ax * (1.0 / al);
+                    double da = std::min(ang, rate * dt);
+                    e.bu = ckRot(e.bu, ax, da); e.bf = ckRot(e.bf, ax, da); e.br = ckRot(e.br, ax, da);
+                    ckOrto(e);
+                };
+                V3 hacia = {g_lanzP.x - e.p.x, 0, g_lanzP.z - e.p.z};
+                const double dh = std::sqrt(hacia.x * hacia.x + hacia.z * hacia.z);
+                V3 hd = dh > 1e-3 ? hacia * (1.0 / dh) : V3{1, 0, 0};
+                if (k.autop == 2) {
+                    alinear({0, 1, 0}, 0.7);
+                    const double vmax = std::min(40.0, dh * 0.25), lim = std::max(0.0, std::min(vmax, h * 0.6));
+                    V3 vt = hd * lim; const double q2 = std::min(1.0, 2.0 * dt);
+                    k.V.x += (vt.x - k.V.x) * q2; k.V.z += (vt.z - k.V.z) * q2;
+                    const double vd = std::min(110.0, std::sqrt(2.0 * 9.0 * std::max(0.0, h - 0.3)));
+                    const double tvy = h > 1.0 ? -std::max(vd, 2.0) : -1.0;
+                    k.V.y += (tvy - k.V.y) * std::min(1.0, 3.0 * dt);
+                    k.quema = h < 450.0 && k.V.y < -3.0;
+                    k.calor = 0;
+                    if (h <= 0.4) {        // tocaste el suelo: la nave queda de pie, convertida en bloques
+                        k.V = {0, 0, 0}; k.quema = false; k.autop = 0; k.calor = 0;
+                        ckAterrizaje();
+                        return;
+                    }
+                } else {
+                    V3 tu = norm(V3{0, 1, 0} * std::cos(1.35) + hd * std::sin(1.35));   // cabeza hacia el horizonte: se estrella de lado
+                    alinear(tu, 0.35);
+                    k.quema = false;
+                    const double q2 = std::min(1.0, 0.8 * dt);
+                    k.V.x += (hd.x * std::min(30.0, dh * 0.1) - k.V.x) * q2; k.V.z += (hd.z * std::min(30.0, dh * 0.1) - k.V.z) * q2;
+                }
+            }
+        }
         e.p = e.p + k.V * dt;
-        if (k.enLuna && g_modoLuna && !k.esperaLuna && ckChoque(k)) { ckAterrizaje(); return; }
+        if (k.bloques && g_modoLuna && e.p.y > k.techo && !g_tierraPend && !k.pad) { g_tierraPend = true; k.esperaLuna = true; aviso("SALIENDO DE LA LUNA..."); }
+        if (k.pad && e.p.y < k.padY) { e.p.y = k.padY; if (k.V.y < 0) k.V.y = 0; }
+        if (((k.enLuna && g_modoLuna) || k.reentrada) && !k.esperaLuna && !k.pad && !(k.bloques && g_modoLuna && e.p.y < k.padY + 8.0) && k.autop != 2 && ckChoque(k)) { ckAterrizaje(); return; }
         if (k.e1vivo) {
             Veh& a = k.e1;
             a.bf = ckRot(a.bf, a.br, -k.w1.x * dt); a.bu = ckRot(a.bu, a.br, -k.w1.x * dt);
@@ -587,14 +783,14 @@ static void ckCamara(V3& mira, V3& cam, V3& arriba) {
     V3 f, r, u; vehBase(k.e2, f, r, u);
     if (k.cab) {
         double hp = std::max(-1.4, std::min(1.4, g_j.pitch)), hy = g_j.yaw;
-        cam = k.e2.p + u * ((CK_FLOOR + 3 - CK_O2) * VS);
+        cam = k.e2.p + u * (k.camY * VS);
         double ch = std::cos(hp), sh = std::sin(hp), cy = std::cos(hy), sy = std::sin(hy);
         mira = norm(f * (ch * cy) + r * (ch * sy) + u * sh);
         arriba = u;
     } else {
         V3 tgt = k.fase < 2 ? k.P + u * ((55 - CK_O1) * VS) : k.e2.p - u * 4.0;
         double d = k.fase < 2 ? k.P.y - k.y0 : 0;
-        double dist = k.fase < 2 ? 50.0 + std::min(70.0, d * 0.05) : 42.0;
+        double dist = k.fase < 2 ? 50.0 + std::min(70.0, d * 0.05) : k.camD;
         mira = {std::cos(g_j.pitch) * std::sin(g_j.yaw), std::sin(g_j.pitch), -std::cos(g_j.pitch) * std::cos(g_j.yaw)};
         if (k.fase == 2 && std::getenv("CK_CAM_LUNA")) mira = norm(ckLunaRel(tgt));                 // (pruebas) mirar hacia la Luna
         if (k.fase == 2 && std::getenv("CK_CAM_TIERRA")) { double ex, ez; ckTierraXZ(tgt, ex, ez); mira = norm(V3{ex - tgt.x, -CK_RP - tgt.y, ez - tgt.z}); }   // (pruebas) mirar hacia la Tierra
@@ -605,6 +801,7 @@ static void ckCamara(V3& mira, V3& cam, V3& arriba) {
     double sh = 0;
     if (k.fase == 0 && k.t > 3.0) sh = 0.04 + 0.05 * (k.t - 3.0);
     else if (k.fase == 1 && k.tv < 8.0) sh = 0.30 * (1.0 - k.tv / 8.0);
+    if (k.calor > 0.05) sh = std::max(sh, 0.25 * k.calor);
     if (sh > 0) {
         uint32_t s = (uint32_t)(k.tReloj * 60.0);
         cam = cam + V3{(ckR(s) - 0.5) * sh, (ckR(s + 7) - 0.5) * sh, (ckR(s + 13) - 0.5) * sh};
@@ -647,7 +844,7 @@ static void ckDibujar(const float* vp, V3 cam, const float* sol, float solF, flo
             double t = s / (double)L;
             double fl = 0.75 + 0.5 * ckR(sem * 7 + s * 3);
             float hx = (float)(1.9 * (1.0 - 0.65 * t) * fl);
-            float cy = (float)(CK_SPLIT - CK_O2 - 1.5 - s);
+            float cy = (float)(k.flamaY - s);
             ckCaja(o, (float)((ckR(sem + s) - 0.5) * 0.3 * VS), (float)(cy * VS), (float)((ckR(sem + 9 + s) - 0.5) * 0.3 * VS), hx * (float)VS, 0.5f * (float)VS, hx * (float)VS,
                    0.75f, (float)(0.90 - 0.60 * t), (float)(1.0 - 0.9 * t), 2.0f);
         }
@@ -659,6 +856,53 @@ static void ckDibujar(const float* vp, V3 cam, const float* sol, float solF, flo
         glUniform3f(U("uU"), (float)u.x, (float)u.y, (float)u.z);
         glUniform3f(U("uF"), (float)f.x, (float)f.y, (float)f.z);
         if (k.flama.n) { glBindVertexArray(k.flama.vao); glDrawArrays(GL_TRIANGLES, 0, k.flama.n); }
+    }
+    if (!vidrio && k.fase == 2 && !g_modoLuna) {     // v71: lineas de velocidad (estrellas que pasan) y fuego de reentrada
+        const double vel = std::sqrt(ckDot(k.V, k.V));
+        if (false && vel > 60.0 && !k.reentrada) {     // v71e: lineas de velocidad descartadas
+            V3 vh = k.V * (1.0 / vel);
+            V3 ref = std::fabs(vh.y) > 0.9 ? V3{1, 0, 0} : V3{0, 1, 0};
+            V3 r = norm(cruz(ref, vh)), u = cruz(vh, r);
+            std::vector<float> o;
+            const double lon = std::min(40.0, vel * 0.025);
+            const double span = 160.0;
+            const int N = 90;
+            for (int i = 0; i < N; i++) {
+                const double a = ckR(i * 7 + 1) * 6.2831853, rr = 14.0 + ckR(i * 7 + 2) * 70.0;
+                double z = std::fmod(ckR(i * 7 + 3) * span + k.tReloj * vel * 0.9, span) - span * 0.5;
+                const float al = (float)std::min(1.0, 1.4 - std::fabs(z) / (span * 0.5));
+                ckCaja(o, (float)(std::cos(a) * rr), (float)(std::sin(a) * rr), (float)z, 0.10f, 0.10f, (float)lon, 0.75f * al, 0.85f * al, 1.0f * al, 2.0f);
+            }
+            k.fx.subir(o);
+            V3 rel = k.e2.p - cam;
+            glUniform3f(U("uPos"), (float)rel.x, (float)rel.y, (float)rel.z);
+            glUniform3f(U("uR"), (float)r.x, (float)r.y, (float)r.z);
+            glUniform3f(U("uU"), (float)u.x, (float)u.y, (float)u.z);
+            glUniform3f(U("uF"), (float)vh.x, (float)vh.y, (float)vh.z);
+            if (k.fx.n) { glBindVertexArray(k.fx.vao); glDrawArrays(GL_TRIANGLES, 0, k.fx.n); }
+        }
+    }
+    if (!vidrio && k.calor > 0.03) {
+        const double vel = std::sqrt(ckDot(k.V, k.V));
+        if (vel > 1.0) {
+            V3 vh = k.V * (1.0 / vel);
+            std::vector<float> o;
+            uint32_t sem = (uint32_t)(k.tReloj * 40.0);
+            const int L = 26;
+            for (int s = 0; s < L; s++) {
+                const double t = s / (double)L;
+                const double fl = 0.7 + 0.6 * ckR(sem * 5 + s * 3);
+                const float h = (float)((7.0 - 4.0 * t) * k.calor * fl);
+                const V3 c = vh * (-(s * 2.2 * k.calor + 4.0));
+                ckCaja(o, (float)(c.x + (ckR(sem + s) - 0.5) * 3.0), (float)(c.y + (ckR(sem + 9 + s) - 0.5) * 3.0), (float)(c.z + (ckR(sem + 17 + s) - 0.5) * 3.0),
+                       h, h, h, 1.0f, (float)(0.75 - 0.55 * t), (float)(0.35 - 0.3 * t), 2.0f);
+            }
+            k.fx.subir(o);
+            V3 rel = k.e2.p - cam;
+            glUniform3f(U("uPos"), (float)rel.x, (float)rel.y, (float)rel.z);
+            glUniform3f(U("uR"), 1, 0, 0); glUniform3f(U("uU"), 0, 1, 0); glUniform3f(U("uF"), 0, 0, 1);
+            if (k.fx.n) { glBindVertexArray(k.fx.vao); glDrawArrays(GL_TRIANGLES, 0, k.fx.n); }
+        }
     }
     if (!vidrio) {
         // llamas de las 5 toberas (solo con la etapa 1 encendida)

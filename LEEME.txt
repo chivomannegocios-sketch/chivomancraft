@@ -468,3 +468,155 @@ v61 - LUNA CON FASES
  - Combustible: 1.5 por segundo de motor (100 en total). En la Luna el sol y las sombras salen de donde estas.
 
 v62 - la Luna usa el MISMO sol del juego (segun la hora): si su lado visible esta oscuro, vuela al lado claro (marca SOL, tecla 2) y pulsa 3 para descender. Ya no hay sol fijo en el espacio.
+
+v63 - BASE SUBTERRANEA EN LA LUNA (bunker futurista de concreto y metal).
+ - Esta a unos 640 bloques del punto de aterrizaje (X=520, Z=-380 del mundo lunar). Usa el item RADAR (menu E, casilla nueva; tenlo en la mano): flecha hacia la base y distancia.
+ - A menos de 160 bloques el radar emite codigo MORSE con una lampara parpadeante: da el codigo DIGITO POR DIGITO. Punto = destello corto, raya = largo. Tabla: 1 .---- 2 ..--- 3 ...-- 4 ....- 5 ..... 6 -.... 7 --... 8 ---.. 9 ----. 0 -----
+ - La puerta gris tiene un teclado a la derecha: clic derecho sobre el, escribe los digitos con las teclas 0-9. Si aciertas, el radar da el siguiente digito; si fallas, repite el mismo. Con los 4 correctos las dos hojas se abren hacia los lados.
+ - El codigo es 1234 o 1969 segun el mundo (fijo por semilla).
+ - Dentro: esclusa, escalera larga, hangar con pasarelas, sala de control, laboratorio y la camara final de la IA.
+ - Bloques nuevos: CONCRETO, METAL, REJILLA, TUBERIA, PUERTA BASE, TECLADO, PANTALLA, FRANJA, PISO BASE, PLACA.
+ - Pruebas rapidas: en el chat escribe /luna (ir a la Luna) y /base (aparecer frente a la puerta).
+ - Luces de la base: ya no son LED sino bloques PLASMA (FRIO en hangar y pasillos, VERDE en el laboratorio, CELESTE en control y nucleo, ROJO de emergencia en la escalera y la camara de la IA). Iluminan con su color.
+
+v64 - SILO VERTICAL detras de la camara de la IA (como la imagen de referencia): sal de la camara por el pasillo del fondo y llegas al pasillo anular del pozo (profundo, con la torre roja central, plataforma y cuatro pasarelas en X). Puertas en las paredes (oeste, este y fondo), avisos, armarios, tuberias y costillas rojas con lamparas hacia abajo.
+ - Bloques nuevos: PLASMA AMBAR, ACERO ROJO, MURO AZUL, CABLE, AVISO, ARMARIO.
+ - Prueba rapida: /luna, /base y camina hasta el fondo (la camara de la IA esta a ~110 bloques de la puerta; el silo a ~150).
+
+v65 - Silo: pasarelas en CRUZ (alineadas con la entrada y las tres puertas), rejillas nuevas CIRCULARES (bloque REJILLA REDONDA: chapa con agujeros redondos) en pasarelas y plataforma, y un ELEVADOR (decorativo, no baja) en la pared norte a la izquierda de la puerta.
+
+v66 - Silo: el ASCENSOR es la cabina del centro (acero rojo con marco metalico, puerta de dos hojas mirando a la entrada; decorativo). Las pasarelas y la plataforma son rejillas de CUBITOS con huecos de verdad (se ve el fondo del pozo) y las barandas son finas de 1 cubito (barras verticales entre dos travesanos, como una baranda real). La plataforma rodea la cabina, asi que puedes pasar de una pasarela a otra. Se quito el ascensor falso de la pared.
+
+v67 - LA IA Y EL MECHA (jefe final de la base lunar).
+  * Barandas: ahora una barra fina de 1 cubito cada 4 cubitos (como las del puente, pero con mas espacio entre barras).
+  * Puerta norte del silo: se abre sola al acercarte, solo hasta la mitad. Detras hay un tunel que lleva a la SALA DE LA IA.
+  * Sala de la IA (amplia, con 4 columnas rojas y luces celestes): al fondo la pantalla grande (apagada). Al centro hay un pedestal con un BOTON ROJO: clic derecho para ACTIVAR LA IA.
+    La pantalla se enciende en azul con barras de luz que suben y bajan (y alumbra la sala). A los 2,5 s se abre la PUERTA GRANDE del hangar (pared este) y sale el MECHA.
+  * MECHA: luces rojas, 500 de vida con barra arriba de la pantalla. Camina hacia ti, te pega de cerca (3 corazones) y lanza salvas de 4 misiles que te persiguen despacio: hay que esquivarlos (dan 2,5 corazones).
+    Con menos de la mitad de vida dispara mas seguido. En la pelea aparecen los corazones aunque estes en creativo; si mueres reapareces en la entrada del tunel.
+    Al destruirlo queda guardado (mundos/.../jefe.txt) y no vuelve a aparecer.
+  * PISTOLA DE PLASMA (item nuevo, en el menu creativo; en survival: 4 aluminio + 2 cobre): clic izquierdo dispara bolas de plasma azul (8 de dano, 3 disparos por segundo).
+  * Bloques nuevos: PANTALLA IA APAGADA / PANTALLA IA, CONSOLA, BOTON IA.
+  * Terreno aplanado y cubierto encima de la sala.
+  Nota: la parte de combate solo se pudo revisar compilando y mirando la geometria en cortes; hay que probarla en tu PC. Si el mecha no sale, avisame que miro.
+
+v68 - EL SUELO SE HUNDE: ALMACEN SUBTERRANEO Y NUEVO MECHA.
+  * Cuando el mecha sale del hangar y se te pone enfrente, la sala tiembla 1,6 s y el SUELO SE ABRE: tu y el mecha caen a un ALMACEN que esta debajo (101 x 98 bloques, 4 veces el area de la sala de la IA).
+    No hay dano de caida en esa caida. El mecha cae mirandote y aterriza agachado (rodilla flexionada, puno al frente) unos 3 s antes de atacar.
+  * Almacen: columnas de acero, luces celestes y rojas de emergencia en el techo, estanterias con cajas en las paredes este y oeste, pilas de cajas, tuberias, cables y avisos. La pelea sigue ahi abajo.
+  * Salida: una ESCALERA en el borde oeste (junto a la pared oeste de la sala), tapada arriba. Se abre al derrotar al mecha. Si mueres durante la pelea reapareces en el almacen junto a la escalera.
+  * Mecha rediseñado (original): mucho mas detallado, de acero oscuro con armadura roja y luces rojas: piernas con pistones, rodillas, aletas laterales y pies con dedos; torso con cristales, nucleo, ventilas, mochila con propulsores; cabeza con visor rojo; hombros con lanzamisiles; manos cerradas.
+    Ahora se mueve por partes (se agacha, gira el torso y balancea brazos y piernas al caminar).
+  * Mundo guardado: si el suelo ya se hundio y recargas, el mecha aparece directamente en el almacen.
+  Nota: no es una copia del personaje de la imagen (no puedo dibujar personajes con derechos), pero tiene la misma actitud: agachado, mirando fijo, puno al frente.
+  Esto no se pudo probar jugando en el servidor: solo compila, y revise la geometria en cortes y el modelo del mecha en dibujos de prueba. Hay que probarlo en tu PC.
+
+v69 - ALMACEN A OSCURAS, LUCES ROJAS QUE CORREN Y SUELO QUE SE RECONSTRUYE.
+  * Al caer al almacen todo esta OSCURO (las lamparas del techo y de las columnas estan apagadas). 1 segundo despues de que el mecha aterriza se encienden.
+  * Con las luces encendidas aparecen 10 LUCES ROJAS DE PLASMA que corren por el suelo y por la pared (4 por la pared a media altura, 3 por un anillo interior del suelo y 3 por uno exterior). Iluminan de rojo por donde pasan. Son bloques que se mueven (cada 0,35-0,5 s).
+  * Al derrotar al mecha: el SUELO DE LA SALA SE RECONSTRUYE (piso, franjas; las columnas quedan), se abre la salida de la escalera, las 10 luces se quedan QUIETAS donde estaban y pasan a BLANCO AZULADO, y las lamparas rojas de emergencia tambien.
+  * Si recargas el mundo en plena pelea, las luces del almacen se encienden solas y pueden quedar algunas luces rojas fijas de la sesion anterior.
+  Sin probar jugando en el servidor (solo compila y vi la geometria en cortes). Probar en tu PC: si al correr las luces el juego se traba, avisame y las hago mas lentas o menos.
+
+v70 - PUERTA OESTE, SALA DEL COHETE Y MAS LUZ EN EL ALMACEN.
+  * Se quitaron las luces rojas que corrian (v69). En su lugar el almacen tiene MUCHA MAS ILUMINACION: mas lamparas en el techo, en las cuatro paredes (dos alturas) y balizas en el suelo. Siguen apagadas al caer y se encienden 1 s despues; al ganar las rojas pasan a blanco azulado.
+  * La PUERTA DE LA IZQUIERDA del silo (oeste) ahora se abre sola al acercarte, pero solo despues de derrotar al mecha (queda guardado en el mundo). Antes esta cerrada.
+  * Detras: un tunel y un POZO CIRCULAR con un COHETE MODERNO: tanque blanco con bandas, ojiva, 4 aletas rojas, 2 propulsores laterales, 5 toberas en el fondo y 4 torres de sujecion sobre una plataforma con foso de gases. La cabina tiene ventanas, consolas y una escotilla.
+  * La PASARELA de cubitos (con baranda fina) lleva desde la pared del pozo hasta la escotilla del cohete.
+  * Boton rojo junto a la escotilla (clic derecho): subes a la cabina, se ABRE LA TAPA DEL TECHO (a ras del suelo, desde el centro hacia los lados) y se encienden los motores con escape de CAZA (postquemador): nucleo blanco azulado, funda naranja y diamantes de choque. Dura unos 40 s.
+  * Todavia NO despega: eso queda para la siguiente version.
+  Sin probar jugando en el servidor (solo compila; geometria revisada en cortes). Probar en tu PC.
+
+v71 - TECHO LIMPIO Y COHETE DE VUELO MANUAL.
+  * Techo: la tapa ahora llega hasta el nivel del suelo y al abrirse tambien se quitan los bloques lunares que quedaban encima. Queda un hueco libre para salir.
+  * Ya NO hay ascenso automatico ni llamas de guion. Al subir (boton rojo), se abre el techo y a los ~5 s el cohete de bloques pasa a ser una NAVE MANUAL como el cohete normal:
+    MANTEN 2 = motor (tu decides cuando despegar), W/S A/D Q/E = girar, MOUSE/TAB = camara (cabina o exterior), con gravedad lunar y combustible.
+  * En la plataforma el cohete queda quieto hasta encender el motor y no gira. G en la plataforma = bajar (el cohete vuelve a ser de bloques y puedes volver a subir).
+  * Si chocas o aterrizas, la nave se convierte en bloques en el suelo (igual que el cohete normal). Hay un limite de altura del mundo lunar (aviso en pantalla).
+  * Si sales del juego volando, el cohete se pierde (sus bloques ya no estan en la sala).
+  Sin probar jugando en el servidor (solo compila; revise cortes: tapa a ras y 18082 cubitos de cohete). Probar en tu PC.
+
+v71b - SALIR AL ESPACIO DESDE LA LUNA E IR A LA TIERRA (estilo No Man's Sky).
+  * Con el cohete de la base: al subir mas alla del limite del mundo lunar se sale AL ESPACIO (cambia al mundo de la Tierra; la Tierra queda a la vista y la Luna se aleja).
+  * Vuelo manual en el espacio: W/S A/D Q/E giran, MANTEN 2 = motor, SHIFT+2 = IMPULSO DE SALTO (4 veces mas fuerte, gasta el doble de combustible), TAB = cabina/exterior.
+  * Sensacion de velocidad: lineas de estrellas que pasan, el campo de vision se abre con la velocidad, marcador TIERRA con distancia, la Tierra te atrae al acercarte.
+  * Al llegar a la atmosfera: REENTRADA con fuego detras de la nave, rozamiento y temblor de camara; frena con 2 apuntando la proa al cielo. El choque desarma la nave en bloques en la Tierra (como en la Luna).
+  * El cohete de la base se consume al despegar: no se puede volver en el mismo viaje a la Luna.
+  Sin probar jugando en el servidor (solo compila y arranca sin errores). Probar en tu PC; los valores (empuje, gravedad, rozamiento) quiza haya que ajustarlos.
+
+v71c - TECHO MUCHO MAS ANCHO Y COMANDO /cohetemoderno.
+  * La abertura del techo ahora es un disco de 21 cubitos de radio (antes un cuadrado de 24): se quita tapa, muro y bloques lunares. Antes las aletas y los propulsores laterales chocaban con el techo y el cohete se quedaba atorado.
+  * Comando /cohetemoderno (o /cohetebase) en el chat: te lleva al tunel de la sala del cohete y repone el cohete moderno y la tapa del techo cerrada, como en el diseno original (sirve si ya despegaste, te atoraste o lo perdiste). Desde la Tierra tambien funciona: te lleva a la Luna.
+  Sin probar jugando (solo compila y arranca sin errores).
+
+v71d - ARREGLO DEL CHOQUE AL DESPEGAR.
+  * Causa probable: la PASARELA (rejilla y barandas) se quedaba en su sitio y las aletas del cohete (y el piso de la cabina) chocaban con ella apenas subia. Ahora, al convertirse en nave, la pasarela se retira (vuelve si bajas con G en la plataforma o con /cohetemoderno).
+  * Ademas, durante los primeros 8 bloques de subida no se detectan choques.
+  Sin probar jugando (solo compila y arranca). Si aun se atora, avisame con que parte del cohete choca.
+
+v71e - SE QUITAN LAS LINEAS BLANCAS DE VELOCIDAD en el espacio (lo demas igual).
+
+v71f - DESCENSO A LA TIERRA CON CARGA PREVIA.
+  * Al llegar a 1000 bloques de la Tierra la nave se detiene un momento ("CARGANDO LA TIERRA...") hasta que cargan los chunks de abajo; luego empieza el descenso desde 1000 bloques de altura, con velocidad maxima inicial de 150. Maniobras con W/S A/D Q/E y frenas con 2.
+  Sin probar jugando.
+
+v72 - DERRUMBES ESTILO RED FACTION Y COLUMNAS DE SOPORTE.
+  * Solo cuentan TUS CONSTRUCCIONES (bloques por encima del terreno natural). El terreno nunca se cae.
+  * Regla de soporte: cada bloque necesita un camino hasta el suelo. Hacia arriba apilando no cuesta, de lado cuesta 1 cubito por celda (maximo 6 BLOQUES sin apoyo), hacia abajo cuesta 2. Un techo de mas de ~12 bloques de ancho entre dos paredes se cae: necesita columnas.
+  * COLUMNAS (tecla C): mira donde empieza y pulsa C; apunta hasta donde llega (o mira al aire para llegar a la altura de tus ojos) y pulsa C otra vez. Se crea una columna de ACERO de 1 bloque de ancho (maximo 120 de alto) que llena los espacios vacios. Una columna sostiene lo que tiene pegado y desde ahi el techo aguanta 6 bloques mas. (Con el espray o la rueda en la mano, C sigue cambiando el color/tamano.)
+  * Se revisa la estabilidad despues de una explosion de TNT y cuando rompes un bloque. Lo que queda sin soporte se desploma en una ola (unos 1,5 s) y se convierte en escombros que caen y se amontonan en el suelo.
+  * No funciona en la Luna (la base lunar no se derrumba).
+  Prueba en el servidor: techo de 20x20 bloques sobre 4 postes; al romper un poste cae la parte lejana de los postes que quedan (423 de 1600 celdas en pie), y con una columna en el centro aguanta mas (772). No probado: aspecto de los escombros, fluidez con estructuras grandes (si se traba con una casa grande, avisame) y la red.
+
+v73 - ESTRUCTURA INVISIBLE (PEGAR + COLUMNAS) Y MENOS TIRONES.
+  * Nueva idea (como Red Faction): ya no se agregan columnas de acero. Se le da MECANICA a los bloques que ya existen:
+    - Y = PEGAR: marca una esquina, apunta a la esquina opuesta y pulsa Y otra vez. Todo lo que haya (o pongas despues) en esa caja queda pegado y forma una estructura que se puede derrumbar (el "piso/casa").
+    - C = COLUMNA INVISIBLE: marca inicio y final de una linea vertical (o mira al aire para llegar a la altura de tus ojos). Los bloques de esa linea pasan a ser SOPORTE: aguantan 6 bloques a cada lado. No se pone ningun bloque nuevo.
+    - U = ver / ocultar la estructura (columnas celestes, cajas pegadas naranjas).
+  * Los bloques SIN pegar nunca se derrumban. Solo se analizan los pegados y las columnas, y solo por encima del terreno natural.
+  * Se guarda en el mundo (archivo estructuras.txt). No funciona en la Luna.
+  * Tirones: los cambios grandes (derrumbes, explosiones de TNT, suelo del mecha, luces de la base, el despegue del cohete) ahora recalculan malla y luz en los hilos de segundo plano; el chunk sigue dibujandose con su malla vieja hasta que la nueva esta lista. Romper/poner un bloque a mano sigue siendo inmediato.
+  Prueba en el servidor (mundo limpio): techo de 20x20 bloques pegado sobre 4 postes; al romper uno caen las zonas lejos de los otros postes (365 de 1600 celdas en pie) y con una columna invisible en el centro aguanta mas (729). Los tirones no se pudieron medir sin GPU.
+
+v74 - SE QUITA LA MECANICA DE PEGAR/COLUMNAS/DERRUMBES (v72-v73). Las teclas Y, U y C (columnas) vuelven a no hacer nada (C sigue cambiando el color del espray y el tamano de la rueda).
+  Se conserva lo bueno de v73: los cambios grandes (TNT, suelo del mecha, luces de la base, despegue del cohete) se remallan en segundo plano para evitar tirones.
+
+
+v75 - HORIZONTE REAL (Pausa > Ajustes de graficos > HORIZONTE REAL: ON/OFF, apagado por defecto).
+  Cuarto anillo del mundo lejano (celdas de 16, hasta 3840 bloques = 3 veces mas lejos) con niebla ajustada.
+  Desde mas de ~420 de altura el suelo de abajo deja de dibujarse con chunks reales y pasa a dibujo simple (como el horizonte); al bajar de ~340 vuelve a lo normal. Lo que construiste (zonas editadas) sigue dibujado real.
+  Sin curvar la geometria: la curvatura se ve por el planeta esferico del cielo. Probado solo en software (sin GPU).
+
+v76 - HORIZONTE REAL curvado: desde ~200 de altura el mundo lejano se curva como la esfera de la Tierra (radio 6000) y encaja con el planeta del cielo; la niebla se apaga con la altura (desde ~600 a ~2600), el borde del mundo lejano es REDONDO y difuminado (ya no se ven cuadros) y el recorte por cuadros se desactiva con curvatura fuerte. Probado solo en software; la parte de la Luna ("imagen congelada") no esta hecha.
+
+v77 - El planeta visto desde arriba/orbita usa el MAPA de tu semilla pegado a la esfera, fijo y con la proyeccion exacta del mundo plano (equidistante), asi coincide con el terreno al bajar. Mapa de 256x256 (como antes). En orbita (nave en el espacio) el mundo lejano ya no se dibuja ni te sigue: solo la textura del planeta, que reacciona a la luz del sol. Probado solo en software.
+
+v78 - Mapa del planeta mejorado: se calcula con relieve y los colores de superficie del mundo lejano (pasto, arena, nieve, piedra, agua), sombreado por pendiente; las nubes del planeta son mas ralas (50%); y el mapa se deforma un poco con ruido para romper los cuadros. Sigue en 256x256. Probado solo en software.
+
+v79 - ARREGLO: al volver a la Tierra la nave podia atravesar el suelo. Causa probable: los chunks no cargados no cuentan como choque. Ahora, al descender (a menos de 700 sobre el terreno), si el suelo bajo la nave (centro y 4 puntos a 14 bloques) o la zona 60 bloques mas abajo aun no esta cargada, la nave se queda quieta y sin gravedad hasta que cargue. No se pudo reproducir en el servidor: sin probar en vuelo real.
+
+v80 - PILOTO AUTOMATICO AL VOLVER A LA TIERRA: la nave entra en la atmosfera sobre el punto de despegue de la Tierra (+40 bloques al este, para no pisar tus construcciones). A 500 bloques sobre el suelo real:
+  - Cohete moderno (el que sale de la base lunar): aterrizaje vertical estilo Elon: se endereza, corrige hacia el punto, frena con motor (llama) y toca suelo a ~1 m/s; queda de pie convertido en bloques. No se puede girar a mano.
+  - Cohete clasico (si algun dia vuelve): se inclina hacia el horizonte sin motor y se estrella de lado (aterrizaje de emergencia: la nave se desarma en bloques).
+  Sigue la espera de chunks de v79. Sin probar en vuelo (no se pudo simular el regreso desde el espacio en el servidor).
+  v80 (cambio extra): CAUSA REAL del bug de atravesar la Tierra con el cohete CLASICO: nunca tenia "regreso" (solo el moderno), asi que si volvias del espacio entraba a la esfera de la Tierra sin chocar. Ahora, si subiste a mas de 2500 de altura y vuelves a menos de 1500 acercandote, el clasico tambien entra en la atmosfera (y la Tierra lo atrae por encima de 4.5 radios). Con el piloto automatico: se estrella de lado a 500 bloques. Sin probar en vuelo real.
+
+v81 - SURVIVAL: RECETAS NUEVAS (cantidades en cubitos; 8 cubitos = 1 bloque).
+  Materiales: ACERO x4 = 8 hierro + 4 carbon. COMBUSTIBLE x4 = 8 carbon + 2 azufre + 2 salitre.
+  COHETE: KIT COHETE = 40 acero + 24 aluminio + 16 combustible. Se usa con CLIC DERECHO (arma el cohete clasico) o los comandos /cohete y /cohetemoderno (en survival consumen 1 kit; en creativo no).
+  Armadura (cuenta si la llevas en el inventario; reducen el dano recibido): CASCO 12 acero + 2 vidrio (-12%); PECHERA 20 acero + 8 aluminio (-25%); BOTAS 10 acero + 4 aluminio (-10%). ESCUDO 16 acero + 8 madera (-30% mientras lo tienes en la mano). Maximo -70%.
+  Armas (clic izquierdo, contra el mecha de la Luna a corta distancia): ESPADA 10 acero + 4 madera (dano 14); ESPADA DE PLASMA 8 aluminio + 6 cobre + 2 titanio (dano 24, rapida); MARTILLO SISMICO 24 acero + 8 madera + 4 azufre (dano 38, lento, con explosion).
+  El menu de recetas ahora tiene paginas (flechas < > arriba). Iconos nuevos. Solo se probo el menu en software; el combate cuerpo a cuerpo y el dano reducido NO se probaron.
+
+v82 - SURVIVAL: ARMAS MEDIEVALES, ARCO Y BLOQUEO.
+  Bloqueadas hasta derrotar al mecha de la Luna (se guarda en tu partida): ESPADA DE PLASMA y MARTILLO SISMICO. Al matarlo salen "ARMAS DESBLOQUEADAS".
+  Nuevas (cantidades en cubitos): DAGA 6 acero + 2 madera (dano 9, muy rapida); ESPADA LARGA 16 acero + 4 madera (18); HACHA DE BATALLA 18 acero + 6 madera (22, lenta); LANZA 8 acero + 10 madera (16, alcance 8); MAZA 14 acero + 6 madera (20).
+  ARCO 16 madera + 4 liana; FLECHA x8 = 4 madera + 2 acero. Clic izquierdo con el arco dispara (gasta 1 flecha, dano 12 al mecha). Por ahora las flechas solo se dibujan/vuelan en la Luna; en la Tierra no hay blancos y el arco avisa.
+  Las armas cuerpo a cuerpo usan una tabla (dano, cadencia, alcance). Probado solo el menu en software; combate, arco y desbloqueo NO probados en juego.
+
+v83 - MENU DE INICIO, MULTIJUGADOR POR WIFI Y "GUARDAR Y SALIR" AL MENU.
+  Al abrir el juego sale el MENU PRINCIPAL: CREAR MUNDO, MIS MUNDOS (la lista de siempre; ESC vuelve al menu), MULTIJUGADOR y SALIR.
+  MULTIJUGADOR: busca solo las partidas abiertas en tu WiFi/red local (el anfitrion las anuncia por UDP, puerto 25577) y las lista; toca una y entras (se baja el mundo del anfitrion). Abajo se puede escribir la IP a mano (solo con teclado) y UNIRSE.
+  Para ser anfitrion (PC o celular): dentro del juego, PAUSA > ABRIR A LA RED WIFI. Ya no hace falta el .bat. (--hospedar y --unir siguen funcionando.)
+  PAUSA > GUARDAR Y SALIR: guarda y vuelve al menu principal. Por dentro el juego se reinicia solo (PC: se relanza el exe; Android: se relanza la app), por eso la ventana se cierra y vuelve a abrir en un instante.
+  Probado en software (Linux, pantalla virtual): menu, pantalla multijugador, deteccion de un anfitrion y union desde la lista (en la misma maquina), y que guardar y salir vuelve al menu. NO probado: Windows real, Android (el relanzado usa JNI y no se pudo compilar aqui), redes WiFi reales (algunos routers/celulares bloquean los anuncios; ahi sirve escribir la IP).

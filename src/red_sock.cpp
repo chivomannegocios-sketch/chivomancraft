@@ -114,3 +114,45 @@ const char* rs_ip_local() {
     cerrar(s);
     return buf;
 }
+
+int rs_udp_abrir(int puerto) {
+    iniciarWS();
+    sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s == SOCK_BAD) return -1;
+    int on = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof on);
+    sockaddr_in a; std::memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_ANY); a.sin_port = htons((unsigned short)puerto);
+    if (bind(s, (sockaddr*)&a, sizeof a) != 0) { cerrar(s); return -1; }
+    noBloq(s);
+    return (int)s;
+}
+int rs_udp_recibir(int s, char* d, int n, char* ip, int ipn) {
+    sockaddr_in a; socklen_t l = sizeof a;
+    int r = (int)recvfrom((sock_t)s, d, n, 0, (sockaddr*)&a, &l);
+    if (r <= 0) return 0;
+    if (ip && ipn > 0) inet_ntop(AF_INET, &a.sin_addr, ip, ipn);
+    return r;
+}
+int rs_udp_difundir(int puerto, const char* d, int n) {
+    iniciarWS();
+    static sock_t s = SOCK_BAD;
+    if (s == SOCK_BAD) {
+        s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (s == SOCK_BAD) return -1;
+        int on = 1;
+        setsockopt(s, SOL_SOCKET, SO_BROADCAST, (const char*)&on, sizeof on);
+    }
+    sockaddr_in a; std::memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET; a.sin_port = htons((unsigned short)puerto); a.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    int r = (int)sendto(s, d, n, 0, (sockaddr*)&a, sizeof a);
+    // tambien a la subred /24 de esta PC (algunos routers no reenvian el 255.255.255.255)
+    char ipl[64]; std::snprintf(ipl, sizeof ipl, "%s", rs_ip_local());
+    unsigned b1, b2, b3, b4;
+    if (std::sscanf(ipl, "%u.%u.%u.%u", &b1, &b2, &b3, &b4) == 4) {
+        char dir[64]; std::snprintf(dir, sizeof dir, "%u.%u.%u.255", b1, b2, b3);
+        inet_pton(AF_INET, dir, &a.sin_addr);
+        sendto(s, d, n, 0, (sockaddr*)&a, sizeof a);
+    }
+    return r;
+}

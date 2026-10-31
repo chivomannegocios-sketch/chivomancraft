@@ -46,6 +46,12 @@
 #define GLFW_KEY_N 78
 #define GLFW_KEY_P 80
 #define GLFW_KEY_K 75
+#ifndef GLFW_KEY_Y
+#define GLFW_KEY_Y 89
+#endif
+#ifndef GLFW_KEY_U
+#define GLFW_KEY_U 85
+#endif
 #define GLFW_KEY_J 74
 #define GLFW_KEY_L 76
 #define GLFW_KEY_2 50
@@ -236,7 +242,30 @@ static void glfwGetFramebufferSize(GLFWwindow*, int* w, int* h) { *w = A_w_px; *
 static void glfwGetWindowSize(GLFWwindow*, int* w, int* h) { *w = A_w_px; *h = A_h_px; }
 static int glfwWindowShouldClose(GLFWwindow*) { return A_cerrar; }
 static void glfwSetWindowShouldClose(GLFWwindow*, int) { A_cerrar = true; if (A_app && A_app->activity) ANativeActivity_finish(A_app->activity); }
-static void glfwTerminate() {
+
+// vuelve a abrir la app (menu de inicio): pide al sistema lanzar de nuevo la actividad principal
+static void A_relanzar() {
+    if (!A_app || !A_app->activity || !A_app->activity->vm) return;
+    JavaVM* vm = A_app->activity->vm;
+    JNIEnv* env = nullptr;
+    if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return;
+    jobject act = A_app->activity->clazz;
+    jclass ca = env->GetObjectClass(act);
+    jmethodID gpm = env->GetMethodID(ca, "getPackageManager", "()Landroid/content/pm/PackageManager;");
+    jmethodID gpn = env->GetMethodID(ca, "getPackageName", "()Ljava/lang/String;");
+    jobject pm = env->CallObjectMethod(act, gpm);
+    jobject pn = env->CallObjectMethod(act, gpn);
+    jclass cpm = env->GetObjectClass(pm);
+    jmethodID gli = env->GetMethodID(cpm, "getLaunchIntentForPackage", "(Ljava/lang/String;)Landroid/content/Intent;");
+    jobject it = env->CallObjectMethod(pm, gli, pn);
+    if (!it) { vm->DetachCurrentThread(); return; }
+    jclass ci = env->GetObjectClass(it);
+    jmethodID af = env->GetMethodID(ci, "addFlags", "(I)Landroid/content/Intent;");
+    env->CallObjectMethod(it, af, (jint)(0x10000000 | 0x00008000));   // NEW_TASK | CLEAR_TASK
+    jmethodID sa = env->GetMethodID(ca, "startActivity", "(Landroid/content/Intent;)V");
+    env->CallVoidMethod(act, sa, it);
+    vm->DetachCurrentThread();
+}static void glfwTerminate() {
     if (A_dpy != EGL_NO_DISPLAY) {
         A_destruirSuperficie();
         if (A_ctx != EGL_NO_CONTEXT) eglDestroyContext(A_dpy, A_ctx);

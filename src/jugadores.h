@@ -190,6 +190,14 @@ static void jugItem(const Remoto& m, double camx, double camy, double camz, floa
         return;
     }
     float base[3]; itemColor(id, base);
+    if (id == 253) {   // pistola de plasma
+        float g[3] = {0.28f, 0.30f, 0.36f}, d[3] = {0.16f, 0.17f, 0.20f}, c[3] = {0.4f, 2.0f, 3.5f};
+        caja(Hx - 1.2f, Hx + 1.2f, Hy - 4, Hy + 1, Hz, Hz + 2.6f, d, true, true, true, true, true, true);          // empuñadura
+        caja(Hx - 1.5f, Hx + 1.5f, Hy + 1, Hy + 4, Hz - 1, Hz + 10, g, true, true, true, true, true, true);        // cuerpo
+        caja(Hx - 0.8f, Hx + 0.8f, Hy + 1.8f, Hy + 3.2f, Hz + 10, Hz + 12, c, true, true, true, true, true, true); // boca de plasma
+        caja(Hx - 1.6f, Hx + 1.6f, Hy + 2.0f, Hy + 2.6f, Hz + 3, Hz + 8, c, true, true, false, false, false, false);   // vena de plasma
+        return;
+    }
     if (id == 250) {   // spray: lata
         float g[3] = {0.62f, 0.64f, 0.70f}, t[3] = {0.9f, 0.2f, 0.2f};
         caja(Hx - 2, Hx + 2, Hy - 1, Hy + 6, Hz, Hz + 4, g, true, true, true, true, true, true);

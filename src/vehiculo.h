@@ -20,6 +20,7 @@ static const char* NOMBRE_COLOR[12] = {"ROJO", "NARANJA", "AMARILLO", "LIMA", "V
 static int g_sprayColor = 0;      // color actual del spray (0..11)
 static int g_ruedaD = 6;          // diametro de la rueda en cubitos (Z / C cambian el tamano)
 
+static bool esEmisivoBase(uint8_t t) { return t == PLASMA_FRIO || t == PLASMA_VERDE || t == PLASMA_CELESTE || t == PLASMA_ROJO || t == PLASMA_AMBAR || t == BASE_PANTALLA || t == BASE_CONSOLA || t == BASE_BOTON; }
 static void colorPieza(uint8_t t, float* c) {
     float r = 0.5f, g = 0.5f, b = 0.5f;
     switch (t) {
@@ -43,6 +44,25 @@ static void colorPieza(uint8_t t, float* c) {
                 case TITANIO: r = 0.70f; g = 0.72f; b = 0.77f; break;
                 case ALUMINIO: r = 0.80f; g = 0.82f; b = 0.86f; break;
                 case HIERRO: r = 0.60f; g = 0.60f; b = 0.64f; break;
+                // v71: piezas del cohete moderno de la base lunar
+                case BASE_ACERO: r = 0.50f; g = 0.53f; b = 0.58f; break;
+                case BASE_MURO: r = 0.48f; g = 0.48f; b = 0.50f; break;
+                case BASE_METAL: r = 0.72f; g = 0.75f; b = 0.80f; break;
+                case BASE_PLACA: r = 0.93f; g = 0.94f; b = 0.96f; break;
+                case BASE_CABLE: r = 0.80f; g = 0.12f; b = 0.10f; break;
+                case BASE_PISO: r = 0.34f; g = 0.35f; b = 0.40f; break;
+                case BASE_FRANJA: r = 0.95f; g = 0.75f; b = 0.10f; break;
+                case BASE_AVISO: r = 0.90f; g = 0.50f; b = 0.10f; break;
+                case BASE_CONCRETO: r = 0.60f; g = 0.60f; b = 0.60f; break;
+                case BASE_TUBERIA: case BASE_REJILLA: r = 0.60f; g = 0.60f; b = 0.65f; break;
+                case PLASMA_FRIO: r = 0.60f; g = 0.90f; b = 1.00f; break;
+                case PLASMA_VERDE: r = 0.30f; g = 1.00f; b = 0.50f; break;
+                case PLASMA_CELESTE: r = 0.40f; g = 0.90f; b = 1.00f; break;
+                case PLASMA_ROJO: r = 1.00f; g = 0.20f; b = 0.15f; break;
+                case PLASMA_AMBAR: r = 1.00f; g = 0.70f; b = 0.20f; break;
+                case BASE_PANTALLA: r = 0.30f; g = 0.70f; b = 1.00f; break;
+                case BASE_CONSOLA: r = 0.25f; g = 0.45f; b = 0.65f; break;
+                case BASE_BOTON: r = 1.00f; g = 0.20f; b = 0.20f; break;
                 default: break;
             }
     }
@@ -237,7 +257,7 @@ static void vehReconstruir(Veh& v) {
             uint8_t o = tipoEn(c.x + D6[k][0], c.y + D6[k][1], c.z + D6[k][2]);
             float va = 1.0f + (hsh(c.x, c.y, c.z) - 0.5f) * 0.08f;
             if (c.t == VIDRIO) { if (!o) quad(mv, c.x, c.y, c.z, k, col, 0.32f, 1.0f); }
-            else if (esLed(c.t)) { if (!o || o == VIDRIO) quad(mo, c.x, c.y, c.z, k, col, 2.0f, 1.0f); }
+            else if (esLed(c.t) || esEmisivoBase(c.t)) { if (!o || o == VIDRIO) quad(mo, c.x, c.y, c.z, k, col, 2.0f, 1.0f); }
             else if (!o || o == VIDRIO) quad(mo, c.x, c.y, c.z, k, col, 1.0f, va);
         }
     }

@@ -50,11 +50,14 @@ enum Tipo : uint8_t { AIRE = 0, PASTO, TIERRA, PIEDRA, ARENA, AGUA, MADERA, HOJA
                       CORAL_ROJO, CORAL_ROSA, CORAL_NARANJA, CORAL_MORADO, CORAL_AMARILLO, CORAL_AZUL,   // v48: oceano con vida
                       ALGA, GRAVA,
                       TNT, TNT_ENC,                // v51: TNT y TNT encendido (parpadea antes de explotar)
+                      BASE_CONCRETO, BASE_METAL, BASE_REJILLA, BASE_TUBERIA, BASE_PUERTA, BASE_TECLADO, BASE_PANTALLA, BASE_FRANJA, BASE_PISO, BASE_PLACA, PLASMA_FRIO, PLASMA_VERDE, PLASMA_CELESTE, PLASMA_ROJO, PLASMA_AMBAR, BASE_ACERO, BASE_MURO, BASE_CABLE, BASE_AVISO, BASE_ARMARIO, BASE_REJ_R, BASE_IA_OFF, BASE_IA_ON, BASE_CONSOLA, BASE_BOTON,   // v63: bloques de la base lunar
                       NTIPOS };
 constexpr int ID_SPRAY = 250;                        // herramienta (no es un bloque)
+constexpr int ID_RADAR = 252;                        // objeto (no es un bloque): radar de senal (v63)
+constexpr int ID_PISTOLA = 253;                      // objeto: pistola de plasma (v67)
 constexpr int ID_POLVORA = 251;                      // objeto (no es un bloque): se fabrica con salitre, carbon y azufre
 static inline bool esPiezaVehiculo(uint8_t t) { return t >= CARROCERIA && t <= CARR_11; }
-static const int NTIPOS_MENU = ANTORCHA + 1 + 2 + 12 + 1 + 7 + 1 + (NTIPOS - NIEVE);       // los que salen en el menu de materiales
+static const int NTIPOS_MENU = ANTORCHA + 1 + 2 + 12 + 1 + 7 + 1 + 1 + 1 + (NTIPOS - NIEVE);       // los que salen en el menu de materiales
 static uint32_t g_semilla = 0;                      // semilla del mundo (0 = mundo clasico)
 static inline bool marProfundo() { return (g_semilla >> 24) & 1u; }   // el bit 24 de la semilla activa los mares profundos (se decide al crear el mundo; viaja con la semilla en la red)
 static inline bool esMineral(uint8_t t) { return (t >= CARBON && t <= CUARZO) || (t >= ESTANO && t <= URANIO) || t == AZUFRE || t == SALITRE; }
@@ -71,7 +74,9 @@ static inline int menuTipo(int i) {   // casilla del menu -> tipo
     if (i == ANTORCHA + 15) return VIDRIO;
     if (i < ANTORCHA + 23) return CARROCERIA + (i - (ANTORCHA + 16));
     if (i == ANTORCHA + 23) return ID_SPRAY;
-    return NIEVE + (i - (ANTORCHA + 24));
+    if (i == ANTORCHA + 24) return ID_RADAR;
+    if (i == ANTORCHA + 25) return ID_PISTOLA;
+    return NIEVE + (i - (ANTORCHA + 26));
 }
 static inline bool esHoja(uint8_t t) { return t == HOJAS || (t >= HOJA_ROJA && t <= HOJA_PINO) || t == HOJA_SELVA || t == HOJA_NIEVE; }
 static inline bool esPlanta(uint8_t t) { return t == LIANA || (t >= FLOR_ROJA && t <= FLOR_ROSA) || t == ALGA; }      // objetos delgados: se atraviesan y dejan pasar la luz
@@ -171,7 +176,7 @@ static int biomaDominante(double bx, double bz) { float w[BIO_N]; return biomaPe
 
 // ---------------------------------------------------------------- v59: mundo de la Luna (sin atmosfera, llanura de aterrizaje en (0,0), crateres alrededor)
 static bool g_modoLuna = false;
-constexpr double LUNA_Y0 = 106.0;            // altura media del suelo lunar (bloques)
+#include "base.h"
 static double alturaLuna(double bx, double bz) {
     const double d0 = std::sqrt(bx * bx + bz * bz);
     const double plano = suave(70.0, 230.0, d0);               // 0 = llanura de aterrizaje
@@ -196,7 +201,23 @@ static double alturaLuna(double bx, double bz) {
                 if (u > 1.0) cr += 0.03 * r * std::exp(-(u - 1.0) * (u - 1.0) / 0.25);              // eyecta
             }
     }
-    return LUNA_Y0 + h + cr * plano;
+    double hh = LUNA_Y0 + h + cr * plano;
+    {   // la base: explanada plana delante de la puerta y una colina grande encima del bunker
+        const double db = std::sqrt((bx - BASE_X) * (bx - BASE_X) + (bz - (BASE_Z + 6.0)) * (bz - (BASE_Z + 6.0)));
+        const double wb = suave(30.0, 90.0, db);
+        hh = LUNA_Y0 + (hh - LUNA_Y0) * wb;
+        const double dm = std::sqrt((bx - BASE_X) * (bx - BASE_X) + (bz - (BASE_Z - 36.0)) * (bz - (BASE_Z - 36.0)));
+        hh += 18.0 * (1.0 - suave(14.0, 48.0, dm));
+        const double ds = std::sqrt((bx - BASE_X) * (bx - BASE_X) + (bz - (BASE_Z - 170.0)) * (bz - (BASE_Z - 170.0)));   // silo vertical (v64)
+        hh = LUNA_Y0 + (hh - LUNA_Y0) * suave(36.0, 80.0, ds);
+        hh += 10.0 * (1.0 - suave(14.0, 42.0, ds));
+        const double dr = std::sqrt((bx - (BASE_X - 62.0)) * (bx - (BASE_X - 62.0)) + (bz - (BASE_Z - 170.0)) * (bz - (BASE_Z - 170.0)));   // pozo del cohete (v70)
+        hh = LUNA_Y0 + (hh - LUNA_Y0) * suave(40.0, 74.0, dr);
+        const double da = std::sqrt((bx - BASE_X) * (bx - BASE_X) + (bz - (BASE_Z - 222.0)) * (bz - (BASE_Z - 222.0)));   // sala de la IA (v67)
+        hh = LUNA_Y0 + (hh - LUNA_Y0) * suave(52.0, 100.0, da);
+        hh += 6.0 * (1.0 - suave(16.0, 56.0, da));
+    }
+    return hh;
 }
 
 // altura del terreno en bloques (bx, bz en bloques): colinas, montanas, lagunas, rios y desiertos
@@ -423,8 +444,9 @@ static DatosChunk generarChunkLuna(int cx, int cy, int cz) {
             int t = (int)std::floor(alturaLuna((ox + lx + 0.5) / SUB, (oz + lz + 0.5) / SUB) * SUB);
             top[lz * CS + lx] = t; minTop = std::min(minTop, t); maxTop = std::max(maxTop, t);
         }
-    if (oy > maxTop) { r.uni = AIRE; return r; }
-    if (oy + CS - 1 <= minTop - 4 * SUB) { r.uni = PIEDRA; return r; }
+    const bool conBase = baseToca(ox, oy, oz);
+    if (!conBase && oy > maxTop) { r.uni = AIRE; return r; }
+    if (!conBase && oy + CS - 1 <= minTop - 4 * SUB) { r.uni = PIEDRA; return r; }
     auto v = std::make_shared<std::vector<uint8_t>>((size_t)CS * CS * CS, (uint8_t)AIRE);
     uint8_t* dt = v->data();
     for (int lz = 0; lz < CS; lz++)
@@ -443,6 +465,7 @@ static DatosChunk generarChunkLuna(int cx, int cy, int cz) {
                 dt[IDX(lx, ly, lz)] = b;
             }
         }
+    if (conBase) baseAplicar(dt, ox, oy, oz);
     uint8_t p = dt[0];
     bool igual = true;
     for (size_t i = 1; i < v->size(); i++) if (dt[i] != p) { igual = false; break; }

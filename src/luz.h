@@ -197,6 +197,9 @@ static void calcularLuz(const SnapColumnas& sn, int cyObj, uint8_t* out) {
         fuente(ANTORCHA, LTORCH, TORCH_RGB);
         { static const float LAVA_RGB[3] = {1.0f, 0.45f, 0.12f}; fuente(LAVA, LTORCH - 2 * SUB, LAVA_RGB); }       // la lava ilumina
         for (int k = 0; k < 12; k++) fuente((uint8_t)(LED_ROJO + k), LLED, LED_RGB[k]);
+        { static const float PL_RGB[5][3] = {{0.80f, 0.92f, 1.0f}, {0.35f, 1.0f, 0.50f}, {0.20f, 0.85f, 1.0f}, {1.0f, 0.15f, 0.10f}, {1.0f, 0.68f, 0.22f}};   // plasma: frio, verde, celeste, rojo de emergencia
+          for (int k = 0; k < 5; k++) fuente((uint8_t)(PLASMA_FRIO + k), LLED, PL_RGB[k]); }
+        { static const float IA_RGB[3] = {0.25f, 0.55f, 1.0f}; fuente(BASE_IA_ON, LLED, IA_RGB); }       // la pantalla de la IA alumbra azul
         luzBFS(BR.data(), T.data(), coste, qr, WH);
         luzBFS(BG.data(), T.data(), coste, qg, WH);
         luzBFS(BB.data(), T.data(), coste, qb, WH);
